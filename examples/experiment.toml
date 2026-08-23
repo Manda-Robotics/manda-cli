@@ -1,0 +1,109 @@
+schema_version = 1
+
+[study]
+id = "state-of-general-robot-policies-2026"
+title = "Beyond Success Rate: A Behavioral Audit of General Robot Policies"
+robolab_root_env = "ROBOLAB_ROOT"
+output_root_env = "ROBOLAB_OUTPUT_ROOT"
+robolab_expected_revision = "UNPINNED"
+isaac_stack = "isaac50"
+renderer = "realtime"
+rendering_type = "balanced"
+instruction_type = "default"
+expected_task_count = 120
+simulator_gpu = 0
+
+# The shipped policy runners do not yet have a verified, uniform episode-seed CLI.
+# These seeds document the intended paired design; DEC-005 blocks claiming episode pairing.
+seed_schedule = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+[policies.pi05]
+enabled = true
+display_name = "pi0.5-DROID"
+runner = "policies/pi0_family/run.py"
+runner_args = ["--policy", "pi05"]
+requires_server = true
+server_host_env = "PI05_SERVER_HOST"
+server_port_env = "PI05_SERVER_PORT"
+server_cwd_env = "OPENPI_ROOT"
+server_command = [
+  "uv",
+  "run",
+  "scripts/serve_policy.py",
+  "--port=8000",
+  "policy:checkpoint",
+  "--policy.config=pi05_droid_jointpos",
+  "--policy.dir=gs://openpi-assets-simeval/pi05_droid_jointpos",
+]
+simulation_gpu = 0
+status_note = "Runnable after OpenPI bootstrap and server health check."
+
+[policies.dreamzero]
+enabled = false
+display_name = "DreamZero-DROID"
+runner = "policies/dreamzero/run.py"
+runner_args = []
+requires_server = true
+server_host_env = "DREAMZERO_SERVER_HOST"
+server_port_env = "DREAMZERO_SERVER_PORT"
+server_cwd_env = "DREAMZERO_ROOT"
+server_command = []
+simulation_gpu = 0
+blocked_by = ["DEC-001", "DEC-002"]
+status_note = "Disabled: choose hosted API or a >=2 H100 local server before enabling."
+
+[stages.smoke]
+description = "End-to-end correctness check with inspectable videos."
+tasks = [
+  "BananaInBowlTask",
+  "RubiksCubeAndBananaTask",
+  "UnstackRubiksCubeTask",
+  "SauceBottlesCrateTask",
+  "ReorientWhiteMugsTask",
+]
+num_envs = 2
+num_runs = 1
+video_mode = "all"
+record_image_data = false
+expected_task_count = 5
+
+[stages.pilot]
+description = "Stratified pilot spanning single/multi-object, relational, stacking, and reorientation tasks."
+tasks = [
+  "BananaInBowlTask",
+  "RubiksCubeAndBananaTask",
+  "RubiksCubeThenBananaTask",
+  "RubiksCubeLeftOfBowlTask",
+  "BananasInBinThreeTotalTask",
+  "RedDishesInBinTask",
+  "ToolOrganizationTask",
+  "UnstackRubiksCubeTask",
+  "Stack3RubiksCubeTask",
+  "ReorientWhiteMugsTask",
+  "TakeMeasuringSpoonOutTask",
+  "PutTwoMugsOnShelfTask",
+]
+num_envs = 10
+num_runs = 1
+video_mode = "sensor"
+record_image_data = false
+expected_task_count = 12
+
+[stages.core]
+description = "Primary fixed-N comparison over RoboLab-120."
+task_selector = "all"
+num_envs = 10
+num_runs = 1
+video_mode = "none"
+record_image_data = false
+expected_task_count = 120
+
+[stages.deep_dive]
+description = "Selected tasks after exploratory ranking; task list intentionally unresolved."
+tasks = []
+num_envs = 10
+num_runs = 3
+video_mode = "all"
+record_image_data = false
+expected_task_count = 0
+blocked_by = ["DEC-007", "FEATURE-005"]

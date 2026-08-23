@@ -1,0 +1,55 @@
+schema_version = 1
+
+[study]
+id = "robolab-isaac60-port-regression"
+title = "RoboLab Isaac Sim 5 to 6 smoke-trajectory regression"
+robolab_root_env = "ROBOLAB_ROOT"
+output_root_env = "ROBOLAB_OUTPUT_ROOT"
+robolab_expected_revision = "UNPINNED"
+isaac_stack = "isaac60"
+renderer = "realtime"
+rendering_type = "balanced"
+instruction_type = "default"
+expected_task_count = 5
+simulator_gpu = 0
+
+# RoboLab's policy runner currently creates every environment with seed 0. The
+# runner does not yet expose a per-episode seed schedule; HDF5 initial-state
+# hashes and field-wise comparisons verify whether episodes are actually paired.
+seed_schedule = [0]
+
+[policies.pi05]
+enabled = true
+display_name = "pi0.5-DROID"
+runner = "policies/pi0_family/run.py"
+runner_args = ["--policy", "pi05"]
+requires_server = true
+server_host_env = "PI05_SERVER_HOST"
+server_port_env = "PI05_SERVER_PORT"
+server_cwd_env = "OPENPI_ROOT"
+server_command = [
+  "uv",
+  "run",
+  "scripts/serve_policy.py",
+  "--port=8000",
+  "policy:checkpoint",
+  "--policy.config=pi05_droid_jointpos",
+  "--policy.dir=gs://openpi-assets-simeval/pi05_droid_jointpos",
+]
+simulation_gpu = 0
+status_note = "Uses the same policy and smoke tasks as the official-RoboLab reference run."
+
+[stages.smoke]
+description = "Repeat the original five-task smoke stage on the Isaac Sim 6 port."
+tasks = [
+  "RubiksCubeThenBananaTask",
+  "RubiksCubeAndBananaTask",
+  "UnstackRubiksCubeTask",
+  "SauceBottlesCrateTask",
+  "ReorientWhiteMugsTask",
+]
+num_envs = 1
+num_runs = 1
+video_mode = "all"
+record_image_data = false
+expected_task_count = 5

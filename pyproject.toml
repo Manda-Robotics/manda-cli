@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "manda-cli"
+version = "0.1.0"
+description = "Standalone client for Manda benchmark execution, artifacts, and analysis"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Manda" }]
+dependencies = []
+
+[project.optional-dependencies]
+analysis = [
+  "h5py>=3.11",
+  "numpy>=2.0",
+  "pyarrow>=16.0",
+]
+dev = [
+  "pytest>=8.3",
+  "ruff>=0.14",
+]
+storage = [
+  "boto3>=1.40",
+]
+all = [
+  "boto3>=1.40",
+  "h5py>=3.11",
+  "numpy>=2.0",
+  "pyarrow>=16.0",
+]
+
+[project.scripts]
+manda = "manda_cli.cli:main"
+robot-audit = "manda_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/manda_cli"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
