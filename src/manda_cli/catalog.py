@@ -123,7 +123,7 @@ def collect_catalog_rows(
     study_id: str | None = None,
     version: str | None = None,
 ) -> dict[str, Any]:
-    """Collect the relational dashboard projection from committed B2 runs."""
+    """Collect a portable relational catalog from committed B2 runs."""
     if study_id:
         safe_identifier(study_id, "study ID")
     catalog_version = version or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")

@@ -16,7 +16,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("artifacts", help_text)
         self.assertIn("extract-trajectories", help_text)
         self.assertIn("execute", help_text)
-        self.assertIn("dashboard", help_text)
+        self.assertNotIn("dashboard", help_text)
 
     def test_artifact_push_has_no_repository_relative_config_default(self) -> None:
         args = _parser().parse_args(
