@@ -132,8 +132,9 @@ manda artifacts publish-catalog \
 
 Catalog publication needs a trusted read/write key scoped to the shared `robolab/v1/` root so it
 can discover all producer prefixes and update shared `derived/` and `catalog/` objects. A catalog
-contains JSON, JSONL, optional Parquet, a manifest, and `_COMPLETE`; each row records the source run
-and manifest digest.
+contains run, task, episode, and asset JSON/JSONL, optional Parquet, a manifest, and `_COMPLETE`;
+each row records the source run and manifest digest. Asset rows contain the private B2 object key,
+content type, size, role, and SHA-256 digest—not a public URL.
 
 ## Bucket administration
 

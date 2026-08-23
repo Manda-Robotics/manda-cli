@@ -34,6 +34,7 @@ manda plan                  Build a deterministic execution plan
 manda doctor                Check RoboLab and policy-server readiness
 manda execute               Dry-run or execute a planned benchmark job
 manda artifacts ...         Checkpoint, publish, list, pull, and verify artifacts
+manda dashboard ...         Inspect and synchronize the hosted dashboard database
 manda validate-results      Validate a local or remotely materialized run
 manda extract-trajectories  Derive HDF5 trajectory metrics
 manda compare-trajectories  Detect action and simulator-state drift
@@ -43,6 +44,29 @@ manda capture-provenance    Record repository, host, and GPU provenance
 
 The command layout leaves room for a future `manda vast ...` provider wrapper without coupling the
 artifact and analysis layers to Vast.ai.
+
+## Hosted dashboard database
+
+Backblaze B2 remains the canonical store for immutable artifacts. Supabase is a rebuildable,
+queryable projection of committed run, task, episode, and asset metadata.
+
+Copy `examples/supabase.env.example` to a private file, then apply the versioned SQL migration in
+`supabase/migrations` using the Supabase CLI. The secret key is for the trusted synchronization
+process only and must never be exposed to a browser:
+
+```bash
+set -a
+source /path/to/storage.env
+source /path/to/supabase.env
+set +a
+
+manda dashboard doctor
+manda dashboard sync --study-id my-study
+manda dashboard sync --study-id my-study --yes
+```
+
+The first `sync` is a read-only plan. `--yes` performs idempotent upserts keyed by each immutable
+run manifest. See the [hybrid dashboard guide](docs/hybrid-dashboard.md).
 
 ## Artifact storage
 

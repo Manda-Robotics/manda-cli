@@ -95,26 +95,44 @@ def _catalog_manifest(output: Path) -> dict[str, Any]:
     }
 
 
-def publish_catalog(
+def _remote_json(manager: ArtifactManager, remote: str, name: str) -> dict[str, Any]:
+    raw = manager.client.cat(remote_join(remote, name))
+    try:
+        value = json.loads(raw or "")
+    except json.JSONDecodeError as exc:
+        raise ArtifactError(f"Invalid {name} at {remote}") from exc
+    if not isinstance(value, dict):
+        raise ArtifactError(f"Expected an object in {name} at {remote}")
+    return value
+
+
+def _object_location(remote: str, path: str) -> tuple[str, str]:
+    joined = remote_join(remote, path)
+    if ":" not in joined:
+        raise ArtifactError(f"Remote has no provider prefix: {remote}")
+    bucket_and_key = joined.split(":", 1)[1].lstrip("/")
+    if "/" not in bucket_and_key:
+        raise ArtifactError(f"Remote has no object key: {joined}")
+    bucket_name, object_key = bucket_and_key.split("/", 1)
+    return bucket_name, object_key
+
+
+def collect_catalog_rows(
     manager: ArtifactManager,
     *,
-    output_dir: str | Path,
     study_id: str | None = None,
     version: str | None = None,
-    parquet: bool = True,
-    upload: bool = True,
 ) -> dict[str, Any]:
+    """Collect the relational dashboard projection from committed B2 runs."""
     if study_id:
         safe_identifier(study_id, "study ID")
     catalog_version = version or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     safe_identifier(catalog_version, "catalog version")
-    output = Path(output_dir).expanduser().resolve() / catalog_version
-    if output.exists() and any(output.iterdir()):
-        raise ArtifactError(f"Catalog output version already exists and is not empty: {output}")
-    output.mkdir(parents=True, exist_ok=True)
+    generated_at = utc_now()
 
     runs = manager.list_runs(study_id=study_id, all_producers=True)
     episodes: list[dict[str, Any]] = []
+    assets: list[dict[str, Any]] = []
     run_catalog: list[dict[str, Any]] = []
     for run in runs:
         remote = str(run["remote"])
@@ -132,30 +150,95 @@ def publish_catalog(
                 }
             )
             episodes.append(enriched)
+
+        manifest = _remote_json(manager, remote, "manifest.json")
+        entries = manifest.get("files")
+        if not isinstance(entries, list):
+            raise ArtifactError(f"Manifest has no files list at {remote}")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ArtifactError(f"Manifest contains an invalid file entry at {remote}")
+            path = entry.get("path")
+            if not isinstance(path, str):
+                raise ArtifactError(f"Manifest contains an invalid path at {remote}")
+            bucket_name, object_key = _object_location(remote, path)
+            first_part = path.split("/", 1)[0]
+            task = first_part if "/" in path and not first_part.startswith("_") else None
+            assets.append(
+                {
+                    "source_run_id": run["run_id"],
+                    "source_manifest_sha256": run.get("manifest_sha256"),
+                    "source_study_id": run.get("study_id"),
+                    "source_producer_id": run.get("producer_id"),
+                    "path": path,
+                    "bucket_name": bucket_name,
+                    "object_key": object_key,
+                    "role": entry.get("role"),
+                    "content_type": entry.get("content_type"),
+                    "bytes": entry.get("bytes"),
+                    "sha256": entry.get("sha256"),
+                    "task_name": task,
+                }
+            )
         run_catalog.append(
             {
                 **{key: value for key, value in run.items() if key != "validation"},
                 "validation": run.get("validation"),
                 "episode_count": len(rows),
+                "object_count": manifest.get("object_count"),
+                "total_bytes": manifest.get("total_bytes"),
             }
         )
 
-    tasks = _task_rows(episodes)
+    return {
+        "schema_version": 1,
+        "catalog_version": catalog_version,
+        "generated_at": generated_at,
+        "study_id": study_id,
+        "runs": run_catalog,
+        "episodes": episodes,
+        "tasks": _task_rows(episodes),
+        "assets": assets,
+    }
+
+
+def publish_catalog(
+    manager: ArtifactManager,
+    *,
+    output_dir: str | Path,
+    study_id: str | None = None,
+    version: str | None = None,
+    parquet: bool = True,
+    upload: bool = True,
+) -> dict[str, Any]:
+    catalog = collect_catalog_rows(manager, study_id=study_id, version=version)
+    catalog_version = str(catalog["catalog_version"])
+    output = Path(output_dir).expanduser().resolve() / catalog_version
+    if output.exists() and any(output.iterdir()):
+        raise ArtifactError(f"Catalog output version already exists and is not empty: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+
+    run_catalog = catalog["runs"]
+    episodes = catalog["episodes"]
+    tasks = catalog["tasks"]
+    assets = catalog["assets"]
     _write_json(
         output / "runs.json",
         {
             "schema_version": 1,
             "catalog_version": catalog_version,
-            "generated_at": utc_now(),
+            "generated_at": catalog["generated_at"],
             "study_id": study_id,
             "runs": run_catalog,
         },
     )
     _write_jsonl(output / "episodes.jsonl", episodes)
     _write_jsonl(output / "tasks.jsonl", tasks)
+    _write_jsonl(output / "assets.jsonl", assets)
     if parquet:
         _write_parquet(output / "episodes.parquet", episodes)
         _write_parquet(output / "tasks.parquet", tasks)
+        _write_parquet(output / "assets.parquet", assets)
 
     manifest = _catalog_manifest(output)
     _write_json(output / "manifest.json", manifest)
@@ -210,9 +293,10 @@ def publish_catalog(
         "output_dir": str(output),
         "remote": derived_remote if upload else None,
         "manifest_sha256": manifest_sha,
-        "run_count": len(runs),
+        "run_count": len(run_catalog),
         "episode_count": len(episodes),
         "task_row_count": len(tasks),
+        "asset_count": len(assets),
         "parquet": parquet,
         "uploaded": upload,
     }

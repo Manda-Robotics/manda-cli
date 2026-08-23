@@ -10,6 +10,7 @@ build/
 
 # Local credentials and runtime outputs
 .env
+supabase.env
 configs/storage.env
 backblaze-app-key
 .artifact-receipts/

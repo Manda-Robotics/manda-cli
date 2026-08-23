@@ -9,8 +9,15 @@ from typing import Any
 from . import __version__
 from .artifacts import ArtifactError, ArtifactManager, verify_local_run
 from .b2_admin import apply_bucket_configuration, configuration_plan
-from .catalog import publish_catalog
+from .catalog import collect_catalog_rows, publish_catalog
 from .config import ConfigError, load_config
+from .dashboard_db import (
+    DashboardIndexer,
+    SupabaseError,
+    SupabaseRestClient,
+    SupabaseSettings,
+    catalog_sync_plan,
+)
 from .doctor import run_doctor
 from .execution import execute_job
 from .interesting import compare_runs, write_comparison
@@ -192,6 +199,23 @@ def _parser() -> argparse.ArgumentParser:
     catalog.add_argument("--version")
     catalog.add_argument("--no-parquet", action="store_true")
     catalog.add_argument("--local-only", action="store_true")
+
+    dashboard = subparsers.add_parser(
+        "dashboard", help="Inspect and synchronize the hosted dashboard read model"
+    )
+    dashboard_subparsers = dashboard.add_subparsers(dest="dashboard_command", required=True)
+    dashboard_subparsers.add_parser(
+        "doctor", help="Check Supabase connectivity and dashboard schema readiness"
+    )
+    dashboard_sync = dashboard_subparsers.add_parser(
+        "sync", help="Build the B2 catalog projection and synchronize it to Supabase"
+    )
+    dashboard_sync.add_argument("--study-id")
+    dashboard_sync.add_argument("--catalog-version")
+    dashboard_sync.add_argument("--batch-size", type=int, default=500)
+    dashboard_sync.add_argument(
+        "--yes", action="store_true", help="Apply the displayed synchronization plan"
+    )
 
     return parser
 
@@ -437,6 +461,32 @@ def _artifacts_command(args: argparse.Namespace) -> int:
     return 0 if report.get("valid", True) else 1
 
 
+def _dashboard_command(args: argparse.Namespace) -> int:
+    action = args.dashboard_command
+    settings = SupabaseSettings.from_environment()
+    client = SupabaseRestClient(settings)
+    if action == "doctor":
+        report = client.doctor()
+    elif action == "sync":
+        if args.batch_size < 1:
+            raise SupabaseError("--batch-size must be at least 1")
+        manager = ArtifactManager.from_environment(require_producer=False)
+        catalog = collect_catalog_rows(
+            manager,
+            study_id=args.study_id,
+            version=args.catalog_version,
+        )
+        report = (
+            DashboardIndexer(client).sync(catalog, batch_size=args.batch_size)
+            if args.yes
+            else {"applied": False, "plan": catalog_sync_plan(catalog)}
+        )
+    else:  # pragma: no cover - argparse enforces the choices
+        raise SupabaseError(f"Unknown dashboard command: {action}")
+    _json(report)
+    return 0 if report.get("ready", True) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     commands = {
@@ -450,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         "compare": _compare_command,
         "capture-provenance": _provenance_command,
         "artifacts": _artifacts_command,
+        "dashboard": _dashboard_command,
     }
     try:
         return commands[args.command](args)
@@ -459,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
         AnalysisDependencyError,
         ArtifactError,
         StorageError,
+        SupabaseError,
         ValueError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)

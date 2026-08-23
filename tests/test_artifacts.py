@@ -267,6 +267,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(report["episode_count"], 2)
         output = Path(report["output_dir"])
         self.assertTrue((output / "runs.json").is_file())
+        self.assertTrue((output / "assets.jsonl").is_file())
+        self.assertGreater(report["asset_count"], 0)
         self.assertTrue((output / "episodes.jsonl").is_file())
         latest = self.remote / "bucket" / "robolab" / "v1" / "catalog" / "latest.json"
         self.assertEqual(json.loads(latest.read_text())["catalog_version"], "catalog-1")
@@ -288,6 +290,7 @@ class ArtifactTests(unittest.TestCase):
         output = Path(report["output_dir"])
         self.assertTrue((output / "episodes.parquet").is_file())
         self.assertTrue((output / "tasks.parquet").is_file())
+        self.assertTrue((output / "assets.parquet").is_file())
 
 
 if __name__ == "__main__":
