@@ -33,6 +33,7 @@ manda validate-config       Validate an experiment TOML file
 manda plan                  Build a deterministic execution plan
 manda doctor                Check RoboLab and policy-server readiness
 manda execute               Dry-run or execute a planned benchmark job
+manda auth ...              Sign in, inspect, and end a user session
 manda artifacts ...         Checkpoint, publish, list, pull, and verify artifacts
 manda validate-results      Validate a local or remotely materialized run
 manda extract-trajectories  Derive HDF5 trajectory metrics
@@ -44,31 +45,43 @@ manda capture-provenance    Record repository, host, and GPU provenance
 The command layout leaves room for a future `manda vast ...` provider wrapper without coupling the
 artifact and analysis layers to Vast.ai.
 
-## Artifact storage
+## User authentication and artifact storage
 
-Copy [examples/storage.env.example](examples/storage.env.example) to a private file outside Git,
-give every producer a unique ID, and point the application-key variable at a `chmod 600` secret
-file:
+Clients authenticate as the same Supabase user used by the web dashboard. Copy
+[examples/auth.env.example](examples/auth.env.example) to a local environment file and fill in the
+project URL and publishable key. Both values are public client configuration; do not add a
+Supabase secret key or Backblaze key.
 
 ```bash
 set -a
-source /path/to/storage.env
+source /path/to/manda-auth.env
 set +a
 
-manda artifacts doctor --write-test
-manda artifacts list --all-producers
-manda artifacts checkpoint --run-dir "$RUN_DIR"
+manda auth login --email you@example.org --client-label vast-gpu-01
+manda auth status
+manda artifacts doctor --study-id my-study --write-test
+manda artifacts checkpoint --run-dir "$RUN_DIR" --study-id my-study
 manda artifacts push --run-dir "$RUN_DIR" --study-id my-study --stage pilot --policy pi05
-manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile analysis
-manda artifacts verify --run-id "$RUN_ID"
+manda artifacts list --study-id my-study
+manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile analysis --study-id my-study
 ```
+
+Email login is invite-only and prompts for the one-time code. The refreshable session is stored in
+a mode-`600` local file. For a non-interactive worker, `--access-token-file` accepts a short-lived
+user access token from a mode-`600` file; the token must be replaced when it expires.
+
+Every transfer requests a short-lived, operation- and path-scoped B2 application key from the
+authenticated access service. The key exists only in the CLI process and is passed to `rclone`
+through its child environment. Benchmark hosts never receive the long-lived B2 administration
+key or a Supabase secret key.
 
 Passing `--config /path/to/experiment.toml` to `artifacts push` adds expected episode/task checks.
 Passing only `--study-id` keeps storage publication independent of a study checkout. See the
 [artifact operations guide](docs/artifact-storage.md) for the full workflow.
 
-Privileged database ingestion, schema migrations, media signing, and dashboard deployment belong
-to the private `manda-infra` repository. This public client never accepts a Supabase service key.
+Privileged database ingestion, bucket configuration, schema migrations, access-broker deployment,
+media signing, and dashboard deployment belong to the private `manda-infra` repository. This
+public client never accepts a Supabase secret key or long-lived B2 credential.
 
 ## Planning and analysis
 

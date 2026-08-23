@@ -9,7 +9,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .artifacts import ArtifactError, ArtifactManager
+from .access import AccessError, MandaAccessClient
+from .artifacts import ArtifactError, ArtifactManager, ensure_run_id
+from .auth import AuthError
 from .config import ConfigError, ExperimentConfig
 from .planning import read_plan
 from .provenance import capture_provenance, write_provenance
@@ -97,6 +99,26 @@ def execute_job(
         raise ConfigError("ROBOLAB_STORAGE_CHECKPOINT_INTERVAL_SECONDS must be an integer") from exc
     if checkpoint_interval < 0:
         raise ConfigError("ROBOLAB_STORAGE_CHECKPOINT_INTERVAL_SECONDS must be >= 0")
+    access_client: MandaAccessClient | None = None
+    producer_id: str | None = None
+
+    def artifact_manager(purpose: str) -> tuple[ArtifactManager, str]:
+        nonlocal access_client, producer_id
+        if access_client is None:
+            access_client = MandaAccessClient.from_environment()
+        if producer_id is None:
+            producer_id = access_client.ensure_producer()
+        run_id = ensure_run_id(run_dir, producer_id)
+        return (
+            access_client.upload_manager(
+                str(job["study_id"]),
+                purpose=purpose,
+                run_id=run_id,
+                producer_id=producer_id,
+            ),
+            run_id,
+        )
+
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
             command,
@@ -113,9 +135,10 @@ def execute_job(
         def checkpoint_loop() -> None:
             while not checkpoint_stop.wait(checkpoint_interval):
                 try:
-                    report = ArtifactManager.from_environment().checkpoint(run_dir)
+                    manager, run_id = artifact_manager("checkpoint")
+                    report = manager.checkpoint(run_dir, run_id=run_id)
                     print(f"Periodic artifact checkpoint: {report['run_id']}")
-                except (ArtifactError, StorageError) as exc:
+                except (AccessError, ArtifactError, AuthError, StorageError) as exc:
                     print(f"Warning: periodic artifact checkpoint failed: {exc}")
 
         if checkpoint_interval:
@@ -145,7 +168,8 @@ def execute_job(
     if return_code != 0:
         if os.environ.get("ROBOLAB_STORAGE_CHECKPOINT_ON_FAILURE") == "1":
             try:
-                report = ArtifactManager.from_environment().checkpoint(run_dir)
+                manager, run_id = artifact_manager("checkpoint")
+                report = manager.checkpoint(run_dir, run_id=run_id)
                 print(
                     "Failure checkpoint: "
                     + json.dumps(
@@ -153,12 +177,12 @@ def execute_job(
                         sort_keys=True,
                     )
                 )
-            except (ArtifactError, StorageError) as exc:
+            except (AccessError, ArtifactError, AuthError, StorageError) as exc:
                 print(f"Warning: failure checkpoint did not complete: {exc}")
         return return_code
 
     if os.environ.get("ROBOLAB_STORAGE_AUTO_FINALIZE") == "1":
-        manager = ArtifactManager.from_environment()
+        manager, run_id = artifact_manager("finalize")
         task_values = job.get("tasks")
         expected_tasks = (
             tuple(str(value) for value in task_values)
@@ -171,12 +195,13 @@ def execute_job(
             report = manager.finalize(
                 run_dir,
                 study_id=str(job["study_id"]),
+                run_id=run_id,
                 stage=str(job["stage"]),
                 policy=str(job["policy"]),
                 expected_episodes=expected_episodes,
                 expected_tasks=expected_tasks,
             )
-        except (ArtifactError, StorageError) as exc:
+        except (AccessError, ArtifactError, AuthError, StorageError) as exc:
             raise ConfigError(
                 f"Experiment completed, but durable artifact finalization failed: {exc}"
             ) from exc

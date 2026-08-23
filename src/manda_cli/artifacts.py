@@ -286,10 +286,8 @@ class ArtifactManager:
         report = self.client.configuration_report()
         report["rclone"] = self.client.version()
         report["root"] = self.settings.root
-        read_target = (
-            self.settings.producer_root
-            if self.settings.producer_id
-            else self.settings.root
+        read_target = self.settings.lease_root or (
+            self.settings.producer_root if self.settings.producer_id else self.settings.root
         )
         self.client.run(["lsf", read_target, "--max-depth", "1"])
         report["readable"] = True
@@ -309,9 +307,8 @@ class ArtifactManager:
                 local = Path(raw) / "probe.json"
                 local.write_text(payload, encoding="utf-8")
                 remote = remote_join(
-                    self.settings.producer_root,
-                    "working",
-                    "_doctor",
+                    self.settings.lease_root
+                    or remote_join(self.settings.producer_root, "working", "_doctor"),
                     f"probe-{uuid.uuid4().hex}.json",
                 )
                 self.client.copyto(local, remote)
@@ -662,10 +659,24 @@ class ArtifactManager:
         destination: str | Path,
         profile: str = "analysis",
         producer_id: str | None = None,
+        study_id: str | None = None,
     ) -> dict[str, Any]:
         if profile not in {"metadata", "analysis", "full"}:
             raise ArtifactError(f"Unknown artifact profile: {profile!r}")
-        remote = self.locate_run(run_id, producer_id=producer_id)
+        if producer_id is not None and study_id is not None:
+            safe_identifier(producer_id, "producer ID")
+            safe_identifier(study_id, "study ID")
+            safe_identifier(run_id, "run ID")
+            remote = remote_join(
+                self.settings.root,
+                "producers",
+                producer_id,
+                "runs",
+                study_id,
+                run_id,
+            )
+        else:
+            remote = self.locate_run(run_id, producer_id=producer_id)
         target = Path(destination).expanduser().resolve()
         target.mkdir(parents=True, exist_ok=True)
         manifest_raw = self.client.cat(remote_join(remote, MANIFEST_FILE))
@@ -716,12 +727,16 @@ class ArtifactManager:
         if not producer:
             raise ArtifactError("A producer ID is required to locate a working checkpoint")
         safe_identifier(producer, "producer ID")
-        remote = remote_join(
-            self.settings.root,
-            "producers",
-            producer,
-            "working",
-            run_id,
+        remote = (
+            self.settings.working_root(run_id)
+            if producer == self.settings.producer_id
+            else remote_join(
+                self.settings.root,
+                "producers",
+                producer,
+                "working",
+                run_id,
+            )
         )
         if not self.client.list_files(remote):
             raise ArtifactError(f"No working checkpoint found for {producer}/{run_id}")

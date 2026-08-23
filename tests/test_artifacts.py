@@ -13,7 +13,6 @@ from manda_cli.artifacts import (
     create_manifest,
     verify_local_run,
 )
-from manda_cli.b2_admin import configuration_plan, desired_lifecycle_rules
 from manda_cli.catalog import publish_catalog
 from manda_cli.storage import StorageSettings
 
@@ -168,19 +167,6 @@ class ArtifactTests(unittest.TestCase):
         report = verify_local_run(run)
         self.assertFalse(report["valid"])
         self.assertTrue(any("mismatch" in error for error in report["errors"]))
-
-    def test_b2_plan_scopes_destructive_expiration_to_working_prefix(self) -> None:
-        rules = desired_lifecycle_rules("robolab/v1", ["node-b", "node-a"])
-        working = [rule for rule in rules if rule["fileNamePrefix"].endswith("/working/")]
-        self.assertEqual(len(working), 2)
-        self.assertTrue(
-            all(rule["daysFromUploadingToHiding"] == 14 for rule in working)
-        )
-        archive = next(rule for rule in rules if rule["fileNamePrefix"] == "robolab/v1/")
-        self.assertIsNone(archive["daysFromUploadingToHiding"])
-        self.assertEqual(archive["daysFromHidingToDeleting"], 30)
-        plan = configuration_plan(self.settings, ["node-a"])
-        self.assertEqual(plan["encryption"]["algorithm"], "AES256 (Backblaze-managed SSE-B2)")
 
     def test_finalize_list_pull_profiles_and_idempotence(self) -> None:
         run = self.root / "run"

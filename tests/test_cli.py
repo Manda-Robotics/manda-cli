@@ -13,6 +13,7 @@ class CliTests(unittest.TestCase):
         parser = _parser()
         self.assertEqual(parser.prog, "manda")
         help_text = parser.format_help()
+        self.assertIn("auth", help_text)
         self.assertIn("artifacts", help_text)
         self.assertIn("extract-trajectories", help_text)
         self.assertIn("execute", help_text)
@@ -35,13 +36,13 @@ class CliTests(unittest.TestCase):
     def test_push_requires_study_id_or_config_before_storage_access(self) -> None:
         stderr = io.StringIO()
         with (
-            patch("manda_cli.cli.ArtifactManager.from_environment") as manager,
+            patch("manda_cli.cli.MandaAccessClient.from_environment") as access,
             contextlib.redirect_stderr(stderr),
         ):
             result = main(["artifacts", "push", "--run-dir", "/tmp/run"])
         self.assertEqual(result, 2)
         self.assertIn("Pass --study-id or --config", stderr.getvalue())
-        manager.assert_not_called()
+        access.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -10,9 +10,12 @@ build/
 
 # Local credentials and runtime outputs
 .env
+*.env
 supabase.env
 configs/storage.env
 backblaze-app-key
+*-app-key
+session.json
 .artifact-receipts/
 artifact-cache/
 derived/

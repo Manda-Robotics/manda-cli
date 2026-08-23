@@ -1,46 +1,84 @@
-# Artifact storage operations
+# Authenticated artifact operations
 
-The Manda CLI treats a private object-storage bucket as the canonical artifact store. GPU hosts
-use local disks as scratch space; producers publish immutable completed runs, and consumers select
-metadata, analysis, or full download profiles.
+Manda uses Backblaze B2 as the canonical store for immutable experiment outputs and Supabase as
+the user identity and dashboard read model. GPU disks are scratch space. A signed-in user can
+checkpoint or publish data only for studies where they are a contributor or owner, and can
+discover or download completed runs only for studies where they are a member.
 
-## Configure a client
+## Configure and sign in
 
-Install `rclone`, copy `examples/storage.env.example` to a private location, and give every
-benchmark producer a stable, unique `ROBOLAB_STORAGE_PRODUCER_ID`. Store the Backblaze application
-key in a separate file with mode `600`; do not put the secret in the environment file.
+Install `rclone`, then copy `examples/auth.env.example` to a local file. The Supabase URL and
+publishable key are public client values. A benchmark host must not receive a Supabase secret key,
+Backblaze administration key, or permanent producer key.
 
 ```bash
-chmod 600 /path/to/storage.env /path/to/backblaze-app-key
 set -a
-source /path/to/storage.env
+source /path/to/manda-auth.env
 set +a
-manda artifacts doctor
+
+manda auth login --email you@example.org --client-label runpod-gpu-01
+manda auth status
 ```
 
-Use a separate prefix-restricted key and producer ID on every marketplace VM. Rotate or revoke the
-key after returning a machine, and do not distribute an account master key.
+Login sends a one-time code to an account that an administrator has already invited. The CLI saves
+the access and rotating refresh tokens under `~/.config/manda/session.json` by default and enforces
+mode `600` on that file. `MANDA_SESSION_FILE` can give isolated workers separate sessions.
 
-To confirm write access, upload and read back a tiny expiring probe:
+For a non-interactive worker, place a short-lived Supabase user access token in a mode-`600` file:
 
 ```bash
-manda artifacts doctor --write-test
+manda auth login --access-token-file /run/secrets/manda-access-token \
+  --client-label vast-worker-03
 ```
+
+This session cannot refresh itself; replace it after expiry. Do not pass a token directly on the
+command line because process listings and shell history may retain it.
+
+On first login, the access service registers a random producer ID owned by that user and client.
+The same local session reuses it. A new VM receives a new producer ID, which keeps concurrent
+writes isolated without asking users to invent globally unique names.
+
+## Credential model
+
+Each storage command asks the authenticated access service for an expiring B2 application key.
+The broker checks the user's study membership and client ownership, then scopes the key to one of:
+
+- a study-specific doctor probe prefix;
+- one working checkpoint for one study and run;
+- one immutable completed-run prefix; or
+- one completed run selected through the membership-protected database.
+
+The temporary secret remains in memory and is injected only into the `rclone` child process. The
+CLI never writes it to its session file, logs, JSON output, or command arguments.
+
+## Check storage access
+
+```bash
+manda artifacts doctor --study-id my-study
+manda artifacts doctor --study-id my-study --write-test
+```
+
+The write test uploads and reads back a tiny probe under its restricted prefix. The probe is
+eligible for the private infrastructure lifecycle policy.
 
 ## Checkpoint and resume
 
 Checkpoint files that have been quiescent for at least two minutes:
 
 ```bash
-manda artifacts checkpoint --run-dir "$RUN_DIR"
+manda artifacts checkpoint \
+  --run-dir "$RUN_DIR" \
+  --study-id my-study
 ```
 
-The generated run ID is stored in `$RUN_DIR/.artifact-run-id`, so repeated checkpoints use the same
-working prefix. A different machine can resume it:
+The generated run ID is stored in `$RUN_DIR/.artifact-run-id`, so later checkpoints use the same
+working prefix. Another machine signed in as the same user can resume it when given the original
+producer ID shown in the checkpoint receipt:
 
 ```bash
 manda artifacts resume \
-  --producer-id vast-metz \
+  --study-id my-study \
+  --producer-id u-original-producer-id \
   --run-id "$RUN_ID" \
   --destination "$RUN_DIR"
 ```
@@ -58,12 +96,13 @@ manda execute \
   --yes
 ```
 
-The periodic checkpoint only copies files older than the safety window, avoiding actively written
-HDF5 files.
+Periodic checkpoints copy only files older than the safety window, avoiding actively written HDF5
+files. Each operation obtains a freshly scoped lease, so a long-running benchmark does not depend
+on a credential that may have expired hours earlier.
 
 ## Publish a completed run
 
-After all writers have stopped, publish with either a standalone study ID:
+After all writers have stopped, publish with a standalone study ID:
 
 ```bash
 manda artifacts push \
@@ -73,7 +112,7 @@ manda artifacts push \
   --policy pi05
 ```
 
-Or pass an experiment config to validate its expected episode and task counts:
+Or pass an experiment config to validate expected episode and task counts:
 
 ```bash
 manda artifacts push \
@@ -87,13 +126,23 @@ Finalization creates `run.json` and a per-file SHA-256 manifest, uploads only ma
 checks the remote payload, and writes `_COMPLETE` last. A completed prefix is immutable. Repeating
 the operation verifies and returns the existing commit instead of rewriting it.
 
+The private indexer projects committed B2 runs into Supabase. Until that synchronization has run,
+the object is durable but will not yet appear in `artifacts list` or the dashboard. This deliberate
+boundary prevents an unverified client request from becoming dashboard data. The infrastructure
+repository documents the synchronization command and is the right place to automate it on a
+schedule or queue.
+
 ## Discover and consume runs
 
 ```bash
 manda artifacts list --study-id my-study
-manda artifacts list --all-producers
 
-manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile metadata
+manda artifacts pull \
+  --run-id "$RUN_ID" \
+  --study-id my-study \
+  --destination ./run \
+  --profile metadata
+
 manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile analysis
 manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile full
 ```
@@ -102,9 +151,11 @@ manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile full
 - `analysis` adds HDF5 and other non-media data but excludes videos and images.
 - `full` materializes the exact manifest payload, including media.
 
-Every pull validates selected files against the committed SHA-256 manifest. Analysis commands also
-accept a remote run ID instead of a local directory and cache the analysis profile under
-`ROBOLAB_ARTIFACT_CACHE` or the platform's default cache directory:
+Every pull validates selected files against the committed SHA-256 manifest. If a run ID happens to
+be reused in more than one accessible study, pass `--study-id` to disambiguate it.
+
+Analysis commands also accept an indexed run ID instead of a local directory and cache the
+analysis profile under `ROBOLAB_ARTIFACT_CACHE` or the platform's default cache directory:
 
 ```bash
 manda validate-results \
@@ -118,50 +169,12 @@ manda extract-trajectories \
   --output derived/pi05-trajectories.jsonl
 ```
 
-## Publish the analysis catalog
-
-Install the analysis extra, then publish an immutable catalog version and update
-`catalog/latest.json`:
+End a user session and revoke its current refresh token with:
 
 ```bash
-python -m pip install -e '.[analysis]'
-manda artifacts publish-catalog \
-  --study-id my-study \
-  --output-dir derived/catalogs
+manda auth logout
 ```
 
-Catalog publication needs a trusted read/write key scoped to the shared `robolab/v1/` root so it
-can discover all producer prefixes and update shared `derived/` and `catalog/` objects. A catalog
-contains run, task, episode, and asset JSON/JSONL, optional Parquet, a manifest, and `_COMPLETE`;
-each row records the source run and manifest digest. Asset rows contain the private B2 object key,
-content type, size, role, and SHA-256 digest—not a public URL.
-
-## Bucket administration
-
-`configure-b2` prints a dry-run plan by default:
-
-```bash
-manda artifacts configure-b2 \
-  --producer-id metz-local \
-  --producer-id vast-metz \
-  --producer-id runpod-colleague
-```
-
-The plan enables Backblaze-managed AES-256 encryption for future uploads, expires current working
-checkpoints after 14 days, deletes hidden working versions one day later, deletes other prior
-versions after 30 days, and cancels unfinished multipart uploads after seven days. Current
-completed objects do not expire.
-
-Applying lifecycle rules permanently deletes eligible versions. Review the complete plan first,
-then explicitly apply it:
-
-```bash
-manda artifacts configure-b2 \
-  --producer-id metz-local \
-  --producer-id vast-metz \
-  --producer-id runpod-colleague \
-  --yes
-```
-
-The provisioner validates the configured bucket name and optional bucket ID, preserves unrelated
-lifecycle rules, and uses Backblaze bucket revisions to avoid overwriting concurrent changes.
+Bucket lifecycle configuration, all-producer catalog publication, Supabase ingestion, membership
+administration, and the B2 key broker are privileged operations in the private `manda-infra`
+repository.

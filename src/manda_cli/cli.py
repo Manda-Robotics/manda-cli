@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .artifacts import ArtifactError, ArtifactManager, verify_local_run
-from .b2_admin import apply_bucket_configuration, configuration_plan
-from .catalog import publish_catalog
+from .access import AccessError, MandaAccessClient, auth_settings_report
+from .artifacts import ArtifactError, ensure_run_id, verify_local_run
+from .auth import AuthError, AuthManager
 from .config import ConfigError, load_config
 from .doctor import run_doctor
 from .execution import execute_job
@@ -17,7 +19,7 @@ from .interesting import compare_runs, write_comparison
 from .planning import build_jobs, write_plan
 from .provenance import capture_provenance, write_provenance
 from .results import ResultsError, validate_results
-from .storage import StorageError, StorageSettings
+from .storage import StorageError
 from .trajectories import (
     AnalysisDependencyError,
     compare_trajectory_runs,
@@ -31,6 +33,18 @@ def _json(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
+def _secure_token_file(path: str) -> str:
+    token_path = Path(path).expanduser().resolve()
+    if not token_path.is_file():
+        raise AuthError(f"Access-token file does not exist: {token_path}")
+    if token_path.stat().st_mode & 0o077:
+        raise AuthError(f"Access-token file must have mode 600: {token_path}")
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token:
+        raise AuthError("Access-token file is empty")
+    return token
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="manda",
@@ -41,6 +55,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    auth = subparsers.add_parser("auth", help="Sign in and manage this CLI user session")
+    auth_subparsers = auth.add_subparsers(dest="auth_command", required=True)
+    auth_login = auth_subparsers.add_parser(
+        "login", help="Sign in with an invite-only email OTP or an access-token file"
+    )
+    auth_login.add_argument("--email")
+    auth_login.add_argument("--access-token-file")
+    auth_login.add_argument("--client-label")
+    auth_subparsers.add_parser("status", help="Show the current user, memberships, and client")
+    auth_subparsers.add_parser("logout", help="Revoke and remove this CLI session")
 
     validate = subparsers.add_parser("validate-config", help="Validate experiment TOML")
     validate.add_argument("--config", required=True)
@@ -121,23 +146,16 @@ def _parser() -> argparse.ArgumentParser:
     artifact_subparsers = artifacts.add_subparsers(dest="artifact_command", required=True)
 
     artifact_doctor = artifact_subparsers.add_parser(
-        "doctor", help="Check rclone, credentials, bucket access, and optional write/read-back"
+        "doctor", help="Check authenticated storage access and optional write/read-back"
     )
+    artifact_doctor.add_argument("--study-id", required=True)
     artifact_doctor.add_argument("--write-test", action="store_true")
-
-    configure_b2 = artifact_subparsers.add_parser(
-        "configure-b2",
-        help="Dry-run or apply SSE-B2 and bounded lifecycle rules to the configured bucket",
-    )
-    configure_b2.add_argument("--producer-id", action="append", dest="producer_ids")
-    configure_b2.add_argument(
-        "--yes", action="store_true", help="Apply the displayed bucket-wide configuration"
-    )
 
     checkpoint = artifact_subparsers.add_parser(
         "checkpoint", help="Copy quiescent run files into resumable working storage"
     )
     checkpoint.add_argument("--run-dir", required=True)
+    checkpoint.add_argument("--study-id", required=True)
     checkpoint.add_argument("--run-id")
     checkpoint.add_argument("--min-age-seconds", type=int, default=120)
 
@@ -145,6 +163,7 @@ def _parser() -> argparse.ArgumentParser:
         "resume", help="Restore an incomplete working checkpoint onto another machine"
     )
     resume.add_argument("--run-id", required=True)
+    resume.add_argument("--study-id", required=True)
     resume.add_argument("--destination", required=True)
     resume.add_argument("--producer-id")
 
@@ -160,10 +179,9 @@ def _parser() -> argparse.ArgumentParser:
     push.add_argument("--audit-dir")
 
     artifact_list = artifact_subparsers.add_parser(
-        "list", help="List completed runs visible to the configured key"
+        "list", help="List completed runs visible to the signed-in user"
     )
     artifact_list.add_argument("--study-id")
-    artifact_list.add_argument("--all-producers", action="store_true")
 
     pull = artifact_subparsers.add_parser(
         "pull", help="Materialize a completed run using a named download profile"
@@ -171,7 +189,7 @@ def _parser() -> argparse.ArgumentParser:
     pull.add_argument("--run-id", required=True)
     pull.add_argument("--destination", required=True)
     pull.add_argument("--profile", choices=["metadata", "analysis", "full"], default="analysis")
-    pull.add_argument("--producer-id")
+    pull.add_argument("--study-id")
 
     verify = artifact_subparsers.add_parser(
         "verify", help="Verify a local materialization or a remote completion marker"
@@ -180,20 +198,48 @@ def _parser() -> argparse.ArgumentParser:
     verify_target.add_argument("--run-dir")
     verify_target.add_argument("--run-id")
     verify.add_argument("--profile", choices=["metadata", "analysis", "full"], default="full")
-    verify.add_argument("--producer-id")
     verify.add_argument("--study-id")
     verify.add_argument("--expected-manifest-sha256")
 
-    catalog = artifact_subparsers.add_parser(
-        "publish-catalog", help="Publish versioned run, episode, task, and Parquet catalogs"
-    )
-    catalog.add_argument("--output-dir", required=True)
-    catalog.add_argument("--study-id")
-    catalog.add_argument("--version")
-    catalog.add_argument("--no-parquet", action="store_true")
-    catalog.add_argument("--local-only", action="store_true")
-
     return parser
+
+
+def _auth_command(args: argparse.Namespace) -> int:
+    manager = AuthManager.from_environment()
+    if args.auth_command == "login":
+        if args.email and args.access_token_file:
+            raise AuthError("Pass either --email or --access-token-file, not both")
+        if args.access_token_file:
+            session = manager.login_access_token(_secure_token_file(args.access_token_file))
+        else:
+            email = (args.email or input("Email: ")).strip()
+            manager.client.start_email_otp(email)
+            print("A one-time sign-in code was sent to the invited account.")
+            otp = getpass.getpass("Email OTP: ").strip()
+            session = manager.login_email(email, otp)
+        access = MandaAccessClient(manager)
+        producer_id = access.ensure_producer(args.client_label)
+        report = {
+            "authenticated": True,
+            "user": {"user_id": session.user_id, "email": session.email},
+            "producer_id": producer_id,
+            "session_file": str(manager.settings.session_file),
+        }
+    elif args.auth_command == "status":
+        session = manager.ensure_session()
+        report = {
+            "authenticated": True,
+            "configuration": auth_settings_report(),
+            "local_session": session.report(),
+            "remote_session": MandaAccessClient(manager).session_report(),
+        }
+    elif args.auth_command == "logout":
+        manager.logout()
+        report = {"authenticated": False, "session_removed": True}
+    else:  # pragma: no cover - argparse enforces the choices
+        raise AuthError(f"Unknown auth command: {args.auth_command}")
+    _json(report)
+    return 0
 
 
 def _validate_command(args: argparse.Namespace) -> int:
@@ -331,10 +377,23 @@ def _materialize_run_reference(value: str) -> Path:
     local = Path(value).expanduser()
     if local.exists():
         return local.resolve()
-    return ArtifactManager.from_environment(require_producer=False).materialize(
-        value,
+    access = MandaAccessClient.from_environment()
+    run = access.find_run(value)
+    cache_root = Path(
+        os.environ.get(
+            "ROBOLAB_ARTIFACT_CACHE",
+            Path.home() / ".cache" / "manda" / "runs",
+        )
+    ).expanduser().resolve()
+    destination = cache_root / run.run_id
+    access.download_manager(run).pull(
+        run.run_id,
+        destination=destination,
         profile="analysis",
+        producer_id=run.producer_id,
+        study_id=run.study_id,
     )
+    return destination
 
 
 def _artifact_study_id(args: argparse.Namespace) -> str:
@@ -349,25 +408,35 @@ def _artifact_study_id(args: argparse.Namespace) -> str:
 def _artifacts_command(args: argparse.Namespace) -> int:
     action = args.artifact_command
     if action == "doctor":
-        manager = ArtifactManager.from_environment(require_producer=args.write_test)
+        access = MandaAccessClient.from_environment()
+        manager = access.upload_manager(args.study_id, purpose="doctor")
         report = manager.doctor(write_test=args.write_test)
-    elif action == "configure-b2":
-        settings = StorageSettings.from_environment()
-        producers = args.producer_ids or [settings.producer_id]
-        report = (
-            apply_bucket_configuration(settings, producers)
-            if args.yes
-            else {"applied": False, "plan": configuration_plan(settings, producers)}
-        )
     elif action == "checkpoint":
-        manager = ArtifactManager.from_environment()
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        if not run_dir.is_dir():
+            raise ArtifactError(f"Run directory does not exist: {run_dir}")
+        access = MandaAccessClient.from_environment()
+        producer_id = access.ensure_producer()
+        run_id = ensure_run_id(run_dir, producer_id, args.run_id)
+        manager = access.upload_manager(
+            args.study_id,
+            purpose="checkpoint",
+            run_id=run_id,
+            producer_id=producer_id,
+        )
         report = manager.checkpoint(
-            args.run_dir,
-            run_id=args.run_id,
+            run_dir,
+            run_id=run_id,
             min_age_seconds=args.min_age_seconds,
         )
     elif action == "resume":
-        manager = ArtifactManager.from_environment(require_producer=False)
+        access = MandaAccessClient.from_environment()
+        manager = access.upload_manager(
+            args.study_id,
+            purpose="checkpoint",
+            run_id=args.run_id,
+            producer_id=args.producer_id,
+        )
         report = manager.resume(
             args.run_id,
             destination=args.destination,
@@ -376,7 +445,18 @@ def _artifacts_command(args: argparse.Namespace) -> int:
     elif action == "push":
         config = load_config(args.config) if args.config else None
         study_id = _artifact_study_id(args)
-        manager = ArtifactManager.from_environment()
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        if not run_dir.is_dir():
+            raise ArtifactError(f"Run directory does not exist: {run_dir}")
+        access = MandaAccessClient.from_environment()
+        producer_id = access.ensure_producer()
+        run_id = ensure_run_id(run_dir, producer_id, args.run_id)
+        manager = access.upload_manager(
+            study_id,
+            purpose="finalize",
+            run_id=run_id,
+            producer_id=producer_id,
+        )
         expected_episodes = None
         expected_tasks = None
         if args.stage and config:
@@ -386,9 +466,9 @@ def _artifacts_command(args: argparse.Namespace) -> int:
             expected_episodes = stage_config.expected_episodes
             expected_tasks = stage_config.tasks or None
         report = manager.finalize(
-            args.run_dir,
+            run_dir,
             study_id=study_id,
-            run_id=args.run_id,
+            run_id=run_id,
             stage=args.stage,
             policy=args.policy,
             expected_episodes=expected_episodes,
@@ -396,41 +476,30 @@ def _artifacts_command(args: argparse.Namespace) -> int:
             audit_dir=args.audit_dir,
         )
     elif action == "list":
-        manager = ArtifactManager.from_environment(require_producer=False)
-        runs = manager.list_runs(
-            study_id=args.study_id,
-            all_producers=args.all_producers,
-        )
+        runs = MandaAccessClient.from_environment().list_runs(study_id=args.study_id)
         report = {"runs": runs, "count": len(runs)}
     elif action == "pull":
-        manager = ArtifactManager.from_environment(require_producer=False)
-        report = manager.pull(
-            args.run_id,
+        access = MandaAccessClient.from_environment()
+        run = access.find_run(args.run_id, study_id=args.study_id)
+        report = access.download_manager(run).pull(
+            run.run_id,
             destination=args.destination,
             profile=args.profile,
-            producer_id=args.producer_id,
+            producer_id=run.producer_id,
+            study_id=run.study_id,
         )
     elif action == "verify":
         if args.run_dir:
             report = verify_local_run(args.run_dir, profile=args.profile)
         else:
-            manager = ArtifactManager.from_environment(require_producer=False)
-            report = manager.verify_remote(
-                args.run_id,
+            access = MandaAccessClient.from_environment()
+            run = access.find_run(args.run_id, study_id=args.study_id)
+            report = access.download_manager(run).verify_remote(
+                run.run_id,
                 expected_manifest_sha256=args.expected_manifest_sha256,
-                study_id=args.study_id,
-                producer_id=args.producer_id,
+                study_id=run.study_id,
+                producer_id=run.producer_id,
             )
-    elif action == "publish-catalog":
-        manager = ArtifactManager.from_environment(require_producer=False)
-        report = publish_catalog(
-            manager,
-            output_dir=args.output_dir,
-            study_id=args.study_id,
-            version=args.version,
-            parquet=not args.no_parquet,
-            upload=not args.local_only,
-        )
     else:  # pragma: no cover - argparse enforces the choices
         raise ArtifactError(f"Unknown artifacts command: {action}")
     _json(report)
@@ -440,6 +509,7 @@ def _artifacts_command(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     commands = {
+        "auth": _auth_command,
         "validate-config": _validate_command,
         "plan": _plan_command,
         "doctor": _doctor_command,
@@ -457,7 +527,9 @@ def main(argv: list[str] | None = None) -> int:
         ConfigError,
         ResultsError,
         AnalysisDependencyError,
+        AccessError,
         ArtifactError,
+        AuthError,
         StorageError,
         ValueError,
     ) as exc:

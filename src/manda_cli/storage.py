@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +41,13 @@ class StorageSettings:
     bucket_id: str | None = None
     key_id: str | None = None
     application_key_file: Path | None = None
+    application_key: str | None = field(default=None, repr=False)
     endpoint: str | None = None
     region: str | None = None
     rclone_binary: str = "rclone"
+    lease_expires_at: str | None = None
+    lease_name_prefix: str | None = None
+    lease_study_id: str | None = None
 
     @classmethod
     def from_environment(cls, *, require_producer: bool = True) -> StorageSettings:
@@ -107,9 +111,50 @@ class StorageSettings:
             rclone_binary=binary,
         )
 
+    @classmethod
+    def from_lease(cls, lease: dict[str, Any]) -> StorageSettings:
+        def required(name: str) -> str:
+            value = lease.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise StorageError(f"Storage lease is missing {name}")
+            return value.strip()
+
+        bucket = required("bucket_name")
+        prefix = required("prefix").strip("/")
+        producer = required("producer_id")
+        safe_identifier(producer, "producer ID")
+        if not prefix or any(part in {".", ".."} for part in prefix.split("/")):
+            raise StorageError("Storage lease contains an unsafe object prefix")
+        endpoint = required("endpoint").rstrip("/")
+        if not endpoint.startswith("https://"):
+            raise StorageError("Storage lease endpoint must use HTTPS")
+        region = lease.get("region")
+        if region is not None and not isinstance(region, str):
+            raise StorageError("Storage lease region must be a string or null")
+        return cls(
+            remote=f"manda-lease:{bucket}",
+            prefix=prefix,
+            producer_id=producer,
+            bucket_id=required("bucket_id"),
+            key_id=required("key_id"),
+            application_key=required("application_key"),
+            endpoint=endpoint,
+            region=region,
+            rclone_binary=os.environ.get("ROBOLAB_STORAGE_RCLONE_BINARY", "rclone").strip(),
+            lease_expires_at=required("expires_at"),
+            lease_name_prefix=required("name_prefix").strip("/"),
+            lease_study_id=required("study_id"),
+        )
+
     @property
     def root(self) -> str:
         return remote_join(self.remote, self.prefix)
+
+    @property
+    def lease_root(self) -> str | None:
+        if not self.lease_name_prefix:
+            return None
+        return remote_join(self.remote, self.lease_name_prefix)
 
     @property
     def producer_root(self) -> str:
@@ -124,6 +169,9 @@ class StorageSettings:
 
     def working_root(self, run_id: str) -> str:
         safe_identifier(run_id, "run ID")
+        if self.lease_study_id:
+            safe_identifier(self.lease_study_id, "study ID")
+            return remote_join(self.producer_root, "working", self.lease_study_id, run_id)
         return remote_join(self.producer_root, "working", run_id)
 
 
@@ -139,12 +187,15 @@ class RcloneClient:
 
     def _environment(self) -> dict[str, str]:
         environment = os.environ.copy()
-        if self.settings.application_key_file is None:
+        if self.settings.application_key_file is None and self.settings.application_key is None:
             return environment
 
         assert self.settings.key_id is not None
         assert self.settings.endpoint is not None
-        secret = self.settings.application_key_file.read_text(encoding="utf-8").strip()
+        secret = self.settings.application_key
+        if secret is None:
+            assert self.settings.application_key_file is not None
+            secret = self.settings.application_key_file.read_text(encoding="utf-8").strip()
         if not secret:
             raise StorageError("Application-key file is empty")
         remote_name = self.settings.remote.split(":", 1)[0]
@@ -255,8 +306,10 @@ class RcloneClient:
             "prefix": self.settings.prefix,
             "producer_id": self.settings.producer_id or None,
             "direct_credentials": self.settings.application_key_file is not None,
+            "temporary_credentials": self.settings.application_key is not None,
             "endpoint": self.settings.endpoint,
             "region": self.settings.region,
+            "lease_expires_at": self.settings.lease_expires_at,
             "application_key_file": (
                 str(self.settings.application_key_file)
                 if self.settings.application_key_file is not None
