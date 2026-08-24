@@ -44,6 +44,11 @@ def remote_join(root: str, *parts: str) -> str:
     return f"{root.rstrip('/')}/{suffix}" if suffix else root.rstrip("/")
 
 
+def remote_directory(value: str) -> str:
+    """Keep the delimiter required by prefix-restricted object-store leases."""
+    return value if value.endswith("/") else value + "/"
+
+
 @dataclass(frozen=True)
 class StorageSettings:
     remote: str
@@ -210,6 +215,13 @@ class RcloneClient:
     def __init__(self, settings: StorageSettings):
         self.settings = settings
 
+    @property
+    def uses_injected_credentials(self) -> bool:
+        return (
+            self.settings.application_key_file is not None
+            or self.settings.application_key is not None
+        )
+
     def _environment(self) -> dict[str, str]:
         environment = os.environ.copy()
         if self.settings.application_key_file is None and self.settings.application_key is None:
@@ -252,9 +264,15 @@ class RcloneClient:
         timeout: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         require_rclone(self.settings.rclone_binary)
+        command = [self.settings.rclone_binary]
+        if self.uses_injected_credentials:
+            # Leased/direct credentials define the remote entirely through the child
+            # environment. Avoid probing the user's unrelated rclone configuration.
+            command.extend(["--config", os.devnull])
+        command.extend(arguments)
         try:
             result = subprocess.run(
-                [self.settings.rclone_binary, *arguments],
+                command,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -281,7 +299,7 @@ class RcloneClient:
     def list_files(self, remote: str, *, include: str | None = None) -> list[tuple[str, int]]:
         command = [
             "lsf",
-            remote,
+            remote_directory(remote),
             "--recursive",
             "--files-only",
             "--format",
@@ -318,13 +336,27 @@ class RcloneClient:
         return result.stdout
 
     def copy(self, source: str | Path, destination: str, *extra: str) -> None:
-        self.run(["copy", str(source), destination, *extra])
+        source_value = str(source)
+        destination_value = destination
+        options = list(extra)
+        if ":" in source_value and not Path(source_value).exists():
+            source_value = remote_directory(source_value)
+        if ":" in destination_value:
+            destination_value = remote_directory(destination_value)
+            if self.uses_injected_credentials:
+                options.extend(
+                    ["--no-check-dest", "--no-traverse", "--s3-no-head", "--retries", "1"]
+                )
+        self.run(["copy", source_value, destination_value, *options])
 
     def copyto(self, source: str | Path, destination: str) -> None:
-        self.run(["copyto", str(source), destination])
+        options: list[str] = []
+        if self.uses_injected_credentials:
+            options.extend(["--no-check-dest", "--s3-no-head", "--retries", "1"])
+        self.run(["copyto", str(source), destination, *options])
 
     def check(self, source: str | Path, destination: str, *extra: str) -> None:
-        self.run(["check", str(source), destination, *extra])
+        self.run(["check", str(source), remote_directory(destination), *extra])
 
     def configuration_report(self) -> dict[str, Any]:
         return {

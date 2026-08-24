@@ -17,7 +17,7 @@ from manda_cli.auth import (
     SessionStore,
     save_client_config,
 )
-from manda_cli.storage import RcloneClient, StorageSettings
+from manda_cli.storage import RcloneClient, StorageSettings, remote_directory
 
 
 class FakeAuthClient:
@@ -78,6 +78,10 @@ def _settings(session_file: Path) -> AuthSettings:
 
 
 class AuthTests(unittest.TestCase):
+    def test_remote_directory_preserves_prefix_delimiter(self) -> None:
+        self.assertEqual(remote_directory("lease:bucket/path"), "lease:bucket/path/")
+        self.assertEqual(remote_directory("lease:bucket/path/"), "lease:bucket/path/")
+
     def test_single_writable_study_is_selected_automatically(self) -> None:
         access = StudyAccessClient(
             [

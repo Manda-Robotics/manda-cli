@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from .results import task_name, validate_results
-from .storage import RcloneClient, StorageSettings, remote_join, safe_identifier
+from .storage import (
+    RcloneClient,
+    StorageSettings,
+    remote_directory,
+    remote_join,
+    safe_identifier,
+)
 
 MANIFEST_SCHEMA_VERSION = 1
 RUN_SCHEMA_VERSION = 1
@@ -314,7 +320,7 @@ class ArtifactManager:
         read_target = self.settings.lease_root or (
             self.settings.producer_root if self.settings.producer_id else self.settings.root
         )
-        self.client.run(["lsf", read_target, "--max-depth", "1"])
+        self.client.run(["lsf", remote_directory(read_target), "--max-depth", "1"])
         report["readable"] = True
         report["write_test"] = None
         if write_test:
