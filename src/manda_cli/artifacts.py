@@ -43,6 +43,31 @@ def text_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def estimate_upload_bytes(
+    root: str | Path,
+    *,
+    min_age_seconds: int = 0,
+    metadata_allowance: int = 1024 * 1024,
+) -> int:
+    """Estimate the bytes that a transfer may add for quota reservation purposes."""
+    run_dir = Path(root).expanduser().resolve()
+    if not run_dir.is_dir():
+        raise ArtifactError(f"Run directory does not exist: {run_dir}")
+    if min_age_seconds < 0:
+        raise ArtifactError("min_age_seconds must be >= 0")
+    cutoff = datetime.now(UTC).timestamp() - min_age_seconds
+    total = 0
+    for path in run_dir.rglob("*"):
+        if path.is_symlink():
+            raise ArtifactError(f"Symlinks are not allowed in archived runs: {path}")
+        if not path.is_file() or path.name == COMPLETE_FILE:
+            continue
+        if min_age_seconds and path.stat().st_mtime > cutoff:
+            continue
+        total += path.stat().st_size
+    return max(1, total + metadata_allowance)
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")

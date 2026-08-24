@@ -14,6 +14,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(parser.prog, "manda")
         help_text = parser.format_help()
         self.assertIn("auth", help_text)
+        self.assertIn("teams", help_text)
+        self.assertIn("studies", help_text)
+        self.assertIn("quota", help_text)
         self.assertIn("artifacts", help_text)
         self.assertIn("extract-trajectories", help_text)
         self.assertIn("execute", help_text)
@@ -33,7 +36,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertEqual(output.getvalue().strip(), "manda 0.1.0")
 
-    def test_push_requires_study_id_or_config_before_storage_access(self) -> None:
+    def test_push_validates_local_run_before_storage_access(self) -> None:
         stderr = io.StringIO()
         with (
             patch("manda_cli.cli.MandaAccessClient.from_environment") as access,
@@ -41,8 +44,25 @@ class CliTests(unittest.TestCase):
         ):
             result = main(["artifacts", "push", "--run-dir", "/tmp/run"])
         self.assertEqual(result, 2)
-        self.assertIn("Pass --study-id or --config", stderr.getvalue())
+        self.assertIn("Run directory does not exist", stderr.getvalue())
         access.assert_not_called()
+
+    def test_team_invite_and_study_grant_arguments(self) -> None:
+        invite = _parser().parse_args(
+            ["teams", "invite", "robotics", "user@example.com", "--role", "admin"]
+        )
+        self.assertEqual(invite.team_id, "robotics")
+        self.assertEqual(invite.email, "user@example.com")
+        self.assertEqual(invite.role, "admin")
+        grant = _parser().parse_args(
+            ["studies", "grant", "pilot", "--team", "robotics", "--role", "contributor"]
+        )
+        self.assertEqual(grant.team_id, "robotics")
+        self.assertEqual(grant.role, "contributor")
+
+    def test_artifact_study_id_is_optional_for_auto_discovery(self) -> None:
+        args = _parser().parse_args(["artifacts", "doctor"])
+        self.assertIsNone(args.study_id)
 
 
 if __name__ == "__main__":

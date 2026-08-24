@@ -5,20 +5,31 @@ the user identity and dashboard read model. GPU disks are scratch space. A signe
 checkpoint or publish data only for studies where they are a contributor or owner, and can
 discover or download completed runs only for studies where they are a member.
 
-## Configure and sign in
+## Sign in and discover access
 
-Install `rclone`, then copy `examples/auth.env.example` to a local file. The Supabase URL and
-publishable key are public client values. A benchmark host must not receive a Supabase secret key,
-Backblaze administration key, or permanent producer key.
+Install `rclone`. The official hosted Supabase URL and publishable key ship with the CLI, so no
+service environment variables are needed. A benchmark host must not receive a Supabase secret
+key, Backblaze administration key, or permanent producer key.
 
 ```bash
-set -a
-source /path/to/manda-auth.env
-set +a
-
 manda auth login --email you@example.org --client-label runpod-gpu-01
 manda auth status
+manda teams list
+manda studies list
+manda quota status
 ```
+
+For a custom deployment, save public discovery settings once instead of exporting them on every
+shell. The key file contains a Supabase publishable key, not a secret:
+
+```bash
+manda auth configure \
+  --supabase-url https://YOUR_PROJECT_REF.supabase.co \
+  --publishable-key-file /path/to/publishable-key
+```
+
+Run `manda auth configure --hosted` to restore the built-in service. Changing services removes the
+local session so tokens cannot accidentally be sent to the wrong project.
 
 Login sends a one-time code to an account that an administrator has already invited. The CLI saves
 the access and rotating refresh tokens under `~/.config/manda/session.json` by default and enforces
@@ -38,6 +49,26 @@ On first login, the access service registers a random producer ID owned by that 
 The same local session reuses it. A new VM receives a new producer ID, which keeps concurrent
 writes isolated without asking users to invent globally unique names.
 
+## Create and share teams and studies
+
+The first account must be invited by the infrastructure operator. Afterwards, owners can perform
+normal onboarding from the CLI:
+
+```bash
+manda teams create --id robotics --name "Robotics team"
+manda teams invite robotics colleague@example.org --role member
+manda teams members robotics
+
+manda studies create --id manipulation-pilot --title "Manipulation pilot" \
+  --owner-team robotics
+manda studies grant manipulation-pilot --email reviewer@example.org --role viewer
+manda studies show manipulation-pilot
+```
+
+Team `owner`/`admin` roles manage membership. Study `viewer` can inspect/download,
+`contributor` can also upload, and `owner` can share the study. A team-owned study gives ordinary
+team members contributor access and team owners/admins owner access.
+
 ## Credential model
 
 Each storage command asks the authenticated access service for an expiring B2 application key.
@@ -46,10 +77,17 @@ The broker checks the user's study membership and client ownership, then scopes 
 - a study-specific doctor probe prefix;
 - one working checkpoint for one study and run;
 - one immutable completed-run prefix; or
-- one completed run selected through the membership-protected database.
+- one completed run selected through the grant-protected database.
 
 The temporary secret remains in memory and is injected only into the `rclone` child process. The
 CLI never writes it to its session file, logs, JSON output, or command arguments.
+
+Before an upload lease is issued, the CLI estimates the transfer size and the service atomically
+reserves it. The hosted personal quota defaults to 5 GiB. Checkpoint reservations remain charged
+until the run is finalized or the abandoned objects are cleaned up; final reservations are
+reconciled to verified manifest bytes by the private indexer. Backblaze keys cannot enforce a byte
+ceiling themselves, so this is cooperative preflight enforcement plus authoritative post-upload
+accounting, not a hard per-request network limiter.
 
 ## Check storage access
 
@@ -57,6 +95,9 @@ CLI never writes it to its session file, logs, JSON output, or command arguments
 manda artifacts doctor --study-id my-study
 manda artifacts doctor --study-id my-study --write-test
 ```
+
+Omit `--study-id` when the account has exactly one writable study. The same automatic selection
+applies to checkpoint, resume, and push.
 
 The write test uploads and reads back a tiny probe under its restricted prefix. The probe is
 eligible for the private infrastructure lifecycle policy.
@@ -175,6 +216,5 @@ End a user session and revoke its current refresh token with:
 manda auth logout
 ```
 
-Bucket lifecycle configuration, all-producer catalog publication, Supabase ingestion, membership
-administration, and the B2 key broker are privileged operations in the private `manda-infra`
-repository.
+Bucket lifecycle configuration, all-producer catalog publication, Supabase ingestion, quota
+overrides, and the B2 key broker are privileged operations in the private `manda-infra` repository.

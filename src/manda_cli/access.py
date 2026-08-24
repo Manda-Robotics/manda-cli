@@ -5,7 +5,7 @@ import socket
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .artifacts import ArtifactError, ArtifactManager
@@ -90,6 +90,79 @@ class MandaAccessClient:
     def session_report(self) -> dict[str, Any]:
         return self._request("GET", "session")
 
+    def list_teams(self) -> list[dict[str, Any]]:
+        return _rows(self._request("GET", "teams"), "teams", "team list")
+
+    def create_team(self, team_id: str, name: str) -> dict[str, Any]:
+        return self._request("POST", "teams", payload={"team_id": team_id, "name": name})
+
+    def list_team_members(self, team_id: str) -> list[dict[str, Any]]:
+        value = self._request("GET", f"teams/{quote(team_id, safe='')}/members")
+        return _rows(value, "members", "team member list")
+
+    def invite_team_member(self, team_id: str, email: str, role: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"teams/{quote(team_id, safe='')}/invitations",
+            payload={"email": email, "role": role},
+        )
+
+    def list_studies(self) -> list[dict[str, Any]]:
+        return _rows(self._request("GET", "studies"), "studies", "study list")
+
+    def create_study(
+        self,
+        study_id: str,
+        title: str,
+        *,
+        owner_team_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {"study_id": study_id, "title": title}
+        if owner_team_id:
+            payload["owner_team_id"] = owner_team_id
+        return self._request("POST", "studies", payload=payload)
+
+    def grant_study(
+        self,
+        study_id: str,
+        role: str,
+        *,
+        email: str | None = None,
+        team_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"role": role}
+        if email:
+            payload["email"] = email
+        if team_id:
+            payload["team_id"] = team_id
+        return self._request(
+            "POST", f"studies/{quote(study_id, safe='')}/grants", payload=payload
+        )
+
+    def quota_status(self) -> dict[str, Any]:
+        value = self._request("GET", "quota")
+        quota = value.get("quota")
+        if not isinstance(quota, dict):
+            raise AccessError("Manda access service returned an invalid quota status")
+        return quota
+
+    def resolve_study(self, study_id: str | None, *, writable: bool) -> str:
+        if study_id:
+            return study_id
+        studies = self.list_studies()
+        if writable:
+            studies = [
+                study
+                for study in studies
+                if study.get("effective_role") in {"owner", "contributor"}
+            ]
+        if len(studies) == 1 and isinstance(studies[0].get("study_id"), str):
+            return str(studies[0]["study_id"])
+        if not studies:
+            qualifier = "writable " if writable else ""
+            raise ArtifactError(f"No {qualifier}studies are available to this account")
+        raise ArtifactError("Multiple studies are available; pass --study-id")
+
     def ensure_producer(self, label: str | None = None) -> str:
         session = self.auth.ensure_session()
         if session.producer_id:
@@ -136,13 +209,21 @@ class MandaAccessClient:
         run_id: str | None = None,
         producer_id: str | None = None,
         producer_label: str | None = None,
+        requested_bytes: int,
     ) -> ArtifactManager:
+        if (
+            isinstance(requested_bytes, bool)
+            or not isinstance(requested_bytes, int)
+            or requested_bytes <= 0
+        ):
+            raise AccessError("requested_bytes must be a positive integer")
         producer_id = producer_id or self.ensure_producer(producer_label)
         payload = {
             "operation": "upload",
             "study_id": study_id,
             "producer_id": producer_id,
             "purpose": purpose,
+            "requested_bytes": requested_bytes,
         }
         if run_id:
             payload["run_id"] = run_id
@@ -161,12 +242,37 @@ class MandaAccessClient:
         )
         return ArtifactManager(StorageSettings.from_lease(_lease(value)))
 
+    def resume_manager(
+        self,
+        study_id: str,
+        run_id: str,
+        producer_id: str,
+    ) -> ArtifactManager:
+        value = self._request(
+            "POST",
+            "storage/lease",
+            payload={
+                "operation": "resume",
+                "study_id": study_id,
+                "run_id": run_id,
+                "producer_id": producer_id,
+            },
+        )
+        return ArtifactManager(StorageSettings.from_lease(_lease(value)))
+
 
 def _lease(value: dict[str, Any]) -> dict[str, Any]:
     lease = value.get("lease")
     if not isinstance(lease, dict):
         raise AccessError("Manda access service returned no storage lease")
     return lease
+
+
+def _rows(value: dict[str, Any], name: str, label: str) -> list[dict[str, Any]]:
+    rows = value.get(name)
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise AccessError(f"Manda access service returned an invalid {label}")
+    return rows
 
 
 def auth_settings_report() -> dict[str, Any]:

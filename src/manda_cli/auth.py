@@ -23,6 +23,10 @@ class AuthHttpError(AuthError):
         super().__init__(f"Authentication request failed ({status}): {message}")
 
 
+DEFAULT_SUPABASE_URL = "https://kstpgdjamqqhogemsooi.supabase.co"
+DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_IC2QLLAzZTmRfpqUHeoWng_dQ1mKyOW"
+
+
 def _validated_https_url(value: str, label: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in {"https", "http"} or not parsed.netloc:
@@ -41,21 +45,100 @@ def _default_session_file() -> Path:
     return (base / "manda" / "session.json").resolve()
 
 
+def _default_config_file() -> Path:
+    override = os.environ.get("MANDA_CONFIG_FILE", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    config_root = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(config_root).expanduser() if config_root else Path.home() / ".config"
+    return (base / "manda" / "config.json").resolve()
+
+
+def _load_client_config(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AuthError(f"Cannot read Manda client configuration: {path}") from exc
+    if not isinstance(value, dict):
+        raise AuthError("Manda client configuration must be a JSON object")
+    result: dict[str, str] = {}
+    for name in ("supabase_url", "publishable_key", "api_url"):
+        configured = value.get(name)
+        if configured is not None and not isinstance(configured, str):
+            raise AuthError(f"Manda client configuration field {name!r} must be a string")
+        if isinstance(configured, str) and configured.strip():
+            result[name] = configured.strip()
+    return result
+
+
+def save_client_config(
+    *,
+    supabase_url: str,
+    publishable_key: str,
+    api_url: str | None = None,
+) -> Path:
+    """Persist non-secret service discovery settings for a custom deployment."""
+    normalized_url = _validated_https_url(supabase_url.strip(), "Supabase URL")
+    normalized_key = publishable_key.strip()
+    if not normalized_key:
+        raise AuthError("Publishable key cannot be empty")
+    normalized_api = (
+        _validated_https_url(api_url.strip(), "Manda API URL")
+        if api_url and api_url.strip()
+        else f"{normalized_url}/functions/v1/manda-access"
+    )
+    path = _default_config_file()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = {
+        "supabase_url": normalized_url,
+        "publishable_key": normalized_key,
+        "api_url": normalized_api,
+    }
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".config-",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
 @dataclass(frozen=True)
 class AuthSettings:
     supabase_url: str
     publishable_key: str = field(repr=False)
     api_url: str = ""
     session_file: Path = Path("session.json")
+    config_file: Path = Path("config.json")
 
     @classmethod
     def from_environment(cls) -> AuthSettings:
-        supabase_url = os.environ.get("MANDA_SUPABASE_URL", "").strip()
-        publishable_key = os.environ.get("MANDA_SUPABASE_PUBLISHABLE_KEY", "").strip()
-        if not supabase_url or not publishable_key:
-            raise AuthError("Set MANDA_SUPABASE_URL and MANDA_SUPABASE_PUBLISHABLE_KEY")
+        config_file = _default_config_file()
+        configured = _load_client_config(config_file)
+        custom_url = os.environ.get("MANDA_SUPABASE_URL", "").strip()
+        custom_url = custom_url or configured.get("supabase_url", "")
+        custom_key = os.environ.get("MANDA_SUPABASE_PUBLISHABLE_KEY", "").strip()
+        custom_key = custom_key or configured.get("publishable_key", "")
+        if bool(custom_url) != bool(custom_key):
+            raise AuthError("Custom Manda configuration requires both URL and publishable key")
+        supabase_url = custom_url or DEFAULT_SUPABASE_URL
+        publishable_key = custom_key or DEFAULT_SUPABASE_PUBLISHABLE_KEY
         supabase_url = _validated_https_url(supabase_url, "MANDA_SUPABASE_URL")
         api_url = os.environ.get("MANDA_API_URL", "").strip()
+        api_url = api_url or configured.get("api_url", "")
         if not api_url:
             api_url = f"{supabase_url}/functions/v1/manda-access"
         api_url = _validated_https_url(api_url, "MANDA_API_URL")
@@ -64,6 +147,7 @@ class AuthSettings:
             publishable_key=publishable_key,
             api_url=api_url,
             session_file=_default_session_file(),
+            config_file=config_file,
         )
 
     def report(self) -> dict[str, Any]:
@@ -72,6 +156,11 @@ class AuthSettings:
             "api_url": self.api_url,
             "publishable_key_configured": True,
             "session_file": str(self.session_file),
+            "config_file": str(self.config_file),
+            "using_hosted_defaults": not self.config_file.exists()
+            and not os.environ.get("MANDA_SUPABASE_URL")
+            and not os.environ.get("MANDA_SUPABASE_PUBLISHABLE_KEY")
+            and not os.environ.get("MANDA_API_URL"),
         }
 
 

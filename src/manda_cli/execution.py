@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .access import AccessError, MandaAccessClient
-from .artifacts import ArtifactError, ArtifactManager, ensure_run_id
+from .artifacts import ArtifactError, ArtifactManager, ensure_run_id, estimate_upload_bytes
 from .auth import AuthError
 from .config import ConfigError, ExperimentConfig
 from .planning import read_plan
@@ -115,6 +115,7 @@ def execute_job(
                 purpose=purpose,
                 run_id=run_id,
                 producer_id=producer_id,
+                requested_bytes=estimate_upload_bytes(run_dir),
             ),
             run_id,
         )

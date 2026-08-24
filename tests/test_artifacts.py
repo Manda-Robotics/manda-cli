@@ -11,6 +11,7 @@ from manda_cli.artifacts import (
     ArtifactError,
     ArtifactManager,
     create_manifest,
+    estimate_upload_bytes,
     verify_local_run,
 )
 from manda_cli.catalog import publish_catalog
@@ -167,6 +168,13 @@ class ArtifactTests(unittest.TestCase):
         report = verify_local_run(run)
         self.assertFalse(report["valid"])
         self.assertTrue(any("mismatch" in error for error in report["errors"]))
+
+    def test_upload_estimate_adds_metadata_allowance_and_ignores_completion(self) -> None:
+        run = self.root / "estimate"
+        run.mkdir()
+        (run / "payload.bin").write_bytes(b"12345")
+        (run / "_COMPLETE").write_bytes(b"already-uploaded-last")
+        self.assertEqual(estimate_upload_bytes(run, metadata_allowance=10), 15)
 
     def test_finalize_list_pull_profiles_and_idempotence(self) -> None:
         run = self.root / "run"

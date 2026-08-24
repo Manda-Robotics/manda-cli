@@ -9,11 +9,13 @@ from unittest.mock import patch
 
 from manda_cli.access import MandaAccessClient
 from manda_cli.auth import (
+    DEFAULT_SUPABASE_URL,
     AuthError,
     AuthManager,
     AuthSession,
     AuthSettings,
     SessionStore,
+    save_client_config,
 )
 from manda_cli.storage import RcloneClient, StorageSettings
 
@@ -58,6 +60,14 @@ class RecordingAccessClient(MandaAccessClient):
         }
 
 
+class StudyAccessClient(MandaAccessClient):
+    def __init__(self, studies: list[dict[str, object]]) -> None:
+        self.studies = studies
+
+    def list_studies(self) -> list[dict[str, object]]:  # type: ignore[override]
+        return self.studies
+
+
 def _settings(session_file: Path) -> AuthSettings:
     return AuthSettings(
         supabase_url="https://project.supabase.co",
@@ -68,6 +78,39 @@ def _settings(session_file: Path) -> AuthSettings:
 
 
 class AuthTests(unittest.TestCase):
+    def test_single_writable_study_is_selected_automatically(self) -> None:
+        access = StudyAccessClient(
+            [
+                {"study_id": "view-only", "effective_role": "viewer"},
+                {"study_id": "writable", "effective_role": "contributor"},
+            ]
+        )
+        self.assertEqual(access.resolve_study(None, writable=True), "writable")
+
+    def test_hosted_auth_settings_work_without_environment_variables(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": raw}, clear=True),
+        ):
+            settings = AuthSettings.from_environment()
+        self.assertEqual(settings.supabase_url, DEFAULT_SUPABASE_URL)
+        self.assertTrue(settings.report()["using_hosted_defaults"])
+
+    def test_custom_client_configuration_is_mode_600_and_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": raw}, clear=True):
+                path = save_client_config(
+                    supabase_url="https://custom.supabase.co",
+                    publishable_key="sb_publishable_custom",
+                )
+                settings = AuthSettings.from_environment()
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(settings.supabase_url, "https://custom.supabase.co")
+            self.assertEqual(
+                settings.api_url,
+                "https://custom.supabase.co/functions/v1/manda-access",
+            )
+
     def test_public_auth_settings_require_https_and_do_not_report_key(self) -> None:
         environment = {
             "MANDA_SUPABASE_URL": "https://project.supabase.co",
@@ -189,6 +232,7 @@ class AuthTests(unittest.TestCase):
             purpose="finalize",
             run_id="run-a",
             producer_id="producer-a",
+            requested_bytes=1234,
         )
         self.assertEqual(
             access.requests,
@@ -202,6 +246,7 @@ class AuthTests(unittest.TestCase):
                         "producer_id": "producer-a",
                         "purpose": "finalize",
                         "run_id": "run-a",
+                        "requested_bytes": 1234,
                     },
                 )
             ],

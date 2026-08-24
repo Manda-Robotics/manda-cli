@@ -10,8 +10,8 @@ from typing import Any
 
 from . import __version__
 from .access import AccessError, MandaAccessClient, auth_settings_report
-from .artifacts import ArtifactError, ensure_run_id, verify_local_run
-from .auth import AuthError, AuthManager
+from .artifacts import ArtifactError, ensure_run_id, estimate_upload_bytes, verify_local_run
+from .auth import AuthError, AuthManager, AuthSettings, SessionStore, save_client_config
 from .config import ConfigError, load_config
 from .doctor import run_doctor
 from .execution import execute_job
@@ -66,6 +66,49 @@ def _parser() -> argparse.ArgumentParser:
     auth_login.add_argument("--client-label")
     auth_subparsers.add_parser("status", help="Show the current user, memberships, and client")
     auth_subparsers.add_parser("logout", help="Revoke and remove this CLI session")
+    auth_configure = auth_subparsers.add_parser(
+        "configure", help="Use a custom Manda service or restore the hosted defaults"
+    )
+    auth_configure.add_argument("--supabase-url")
+    auth_configure.add_argument("--publishable-key-file")
+    auth_configure.add_argument("--api-url")
+    auth_configure.add_argument("--hosted", action="store_true")
+
+    teams = subparsers.add_parser("teams", help="Create teams and manage their members")
+    teams_subparsers = teams.add_subparsers(dest="teams_command", required=True)
+    teams_subparsers.add_parser("list", help="List teams visible to the signed-in user")
+    team_create = teams_subparsers.add_parser("create", help="Create a team owned by this user")
+    team_create.add_argument("--id", required=True, dest="team_id")
+    team_create.add_argument("--name", required=True)
+    team_members = teams_subparsers.add_parser("members", help="List team members")
+    team_members.add_argument("team_id")
+    team_invite = teams_subparsers.add_parser("invite", help="Invite or grant a team member")
+    team_invite.add_argument("team_id")
+    team_invite.add_argument("email")
+    team_invite.add_argument("--role", choices=["member", "admin", "owner"], default="member")
+
+    studies = subparsers.add_parser("studies", help="Create, discover, and share studies")
+    studies_subparsers = studies.add_subparsers(dest="studies_command", required=True)
+    studies_subparsers.add_parser("list", help="List studies visible to the signed-in user")
+    study_show = studies_subparsers.add_parser("show", help="Show one accessible study")
+    study_show.add_argument("study_id")
+    study_create = studies_subparsers.add_parser("create", help="Create a study")
+    study_create.add_argument("--id", required=True, dest="study_id")
+    study_create.add_argument("--title", required=True)
+    study_create.add_argument("--owner-team")
+    study_grant = studies_subparsers.add_parser("grant", help="Share a study with a user or team")
+    study_grant.add_argument("study_id")
+    grant_target = study_grant.add_mutually_exclusive_group(required=True)
+    grant_target.add_argument("--email")
+    grant_target.add_argument("--team", dest="team_id")
+    study_grant.add_argument(
+        "--role", choices=["viewer", "contributor", "owner"], default="viewer"
+    )
+
+    quota = subparsers.add_parser("quota", help="Inspect storage use and reservations")
+    quota.add_subparsers(dest="quota_command", required=True).add_parser(
+        "status", help="Show this user's storage quota"
+    )
 
     validate = subparsers.add_parser("validate-config", help="Validate experiment TOML")
     validate.add_argument("--config", required=True)
@@ -148,14 +191,14 @@ def _parser() -> argparse.ArgumentParser:
     artifact_doctor = artifact_subparsers.add_parser(
         "doctor", help="Check authenticated storage access and optional write/read-back"
     )
-    artifact_doctor.add_argument("--study-id", required=True)
+    artifact_doctor.add_argument("--study-id")
     artifact_doctor.add_argument("--write-test", action="store_true")
 
     checkpoint = artifact_subparsers.add_parser(
         "checkpoint", help="Copy quiescent run files into resumable working storage"
     )
     checkpoint.add_argument("--run-dir", required=True)
-    checkpoint.add_argument("--study-id", required=True)
+    checkpoint.add_argument("--study-id")
     checkpoint.add_argument("--run-id")
     checkpoint.add_argument("--min-age-seconds", type=int, default=120)
 
@@ -163,7 +206,7 @@ def _parser() -> argparse.ArgumentParser:
         "resume", help="Restore an incomplete working checkpoint onto another machine"
     )
     resume.add_argument("--run-id", required=True)
-    resume.add_argument("--study-id", required=True)
+    resume.add_argument("--study-id")
     resume.add_argument("--destination", required=True)
     resume.add_argument("--producer-id")
 
@@ -205,6 +248,36 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _auth_command(args: argparse.Namespace) -> int:
+    if args.auth_command == "configure":
+        current = AuthSettings.from_environment()
+        if args.hosted:
+            if args.supabase_url or args.publishable_key_file or args.api_url:
+                raise AuthError("Pass --hosted by itself")
+            current.config_file.unlink(missing_ok=True)
+            SessionStore(current.session_file).clear()
+            report = AuthSettings.from_environment().report()
+            report["session_removed"] = True
+            _json(report)
+            return 0
+        if not args.supabase_url or not args.publishable_key_file:
+            raise AuthError(
+                "Custom configuration requires --supabase-url and --publishable-key-file"
+            )
+        key_file = Path(args.publishable_key_file).expanduser().resolve()
+        if not key_file.is_file():
+            raise AuthError(f"Publishable-key file does not exist: {key_file}")
+        key = key_file.read_text(encoding="utf-8").strip()
+        path = save_client_config(
+            supabase_url=args.supabase_url,
+            publishable_key=key,
+            api_url=args.api_url,
+        )
+        SessionStore(current.session_file).clear()
+        report = AuthSettings.from_environment().report()
+        report.update({"config_file": str(path), "session_removed": True})
+        _json(report)
+        return 0
+
     manager = AuthManager.from_environment()
     if args.auth_command == "login":
         if args.email and args.access_token_file:
@@ -219,11 +292,15 @@ def _auth_command(args: argparse.Namespace) -> int:
             session = manager.login_email(email, otp)
         access = MandaAccessClient(manager)
         producer_id = access.ensure_producer(args.client_label)
+        remote = access.session_report()
         report = {
             "authenticated": True,
             "user": {"user_id": session.user_id, "email": session.email},
             "producer_id": producer_id,
             "session_file": str(manager.settings.session_file),
+            "teams": remote.get("teams", []),
+            "studies": remote.get("studies", []),
+            "quota": remote.get("quota"),
         }
     elif args.auth_command == "status":
         session = manager.ensure_session()
@@ -239,6 +316,62 @@ def _auth_command(args: argparse.Namespace) -> int:
     else:  # pragma: no cover - argparse enforces the choices
         raise AuthError(f"Unknown auth command: {args.auth_command}")
     _json(report)
+    return 0
+
+
+def _teams_command(args: argparse.Namespace) -> int:
+    access = MandaAccessClient.from_environment()
+    if args.teams_command == "list":
+        teams = access.list_teams()
+        report = {"teams": teams, "count": len(teams)}
+    elif args.teams_command == "create":
+        report = access.create_team(args.team_id, args.name)
+    elif args.teams_command == "members":
+        members = access.list_team_members(args.team_id)
+        report = {"team_id": args.team_id, "members": members, "count": len(members)}
+    elif args.teams_command == "invite":
+        report = access.invite_team_member(args.team_id, args.email, args.role)
+    else:  # pragma: no cover - argparse enforces the choices
+        raise AccessError(f"Unknown teams command: {args.teams_command}")
+    _json(report)
+    return 0
+
+
+def _studies_command(args: argparse.Namespace) -> int:
+    access = MandaAccessClient.from_environment()
+    if args.studies_command == "list":
+        studies = access.list_studies()
+        report = {"studies": studies, "count": len(studies)}
+    elif args.studies_command == "show":
+        matches = [
+            study for study in access.list_studies() if study.get("study_id") == args.study_id
+        ]
+        if not matches:
+            raise AccessError(f"Study {args.study_id!r} is not accessible")
+        report = matches[0]
+    elif args.studies_command == "create":
+        report = access.create_study(
+            args.study_id,
+            args.title,
+            owner_team_id=args.owner_team,
+        )
+    elif args.studies_command == "grant":
+        report = access.grant_study(
+            args.study_id,
+            args.role,
+            email=args.email,
+            team_id=args.team_id,
+        )
+    else:  # pragma: no cover - argparse enforces the choices
+        raise AccessError(f"Unknown studies command: {args.studies_command}")
+    _json(report)
+    return 0
+
+
+def _quota_command(args: argparse.Namespace) -> int:
+    if args.quota_command != "status":  # pragma: no cover - argparse enforces the choices
+        raise AccessError(f"Unknown quota command: {args.quota_command}")
+    _json(MandaAccessClient.from_environment().quota_status())
     return 0
 
 
@@ -396,33 +529,38 @@ def _materialize_run_reference(value: str) -> Path:
     return destination
 
 
-def _artifact_study_id(args: argparse.Namespace) -> str:
+def _artifact_study_id(args: argparse.Namespace, access: MandaAccessClient) -> str:
     if getattr(args, "study_id", None):
         return str(args.study_id)
     config_path = getattr(args, "config", None)
     if config_path:
         return load_config(config_path).study.id
-    raise ArtifactError("Pass --study-id or --config")
+    return access.resolve_study(None, writable=True)
 
 
 def _artifacts_command(args: argparse.Namespace) -> int:
     action = args.artifact_command
     if action == "doctor":
         access = MandaAccessClient.from_environment()
-        manager = access.upload_manager(args.study_id, purpose="doctor")
+        study_id = access.resolve_study(args.study_id, writable=True)
+        manager = access.upload_manager(study_id, purpose="doctor", requested_bytes=1024)
         report = manager.doctor(write_test=args.write_test)
     elif action == "checkpoint":
         run_dir = Path(args.run_dir).expanduser().resolve()
         if not run_dir.is_dir():
             raise ArtifactError(f"Run directory does not exist: {run_dir}")
         access = MandaAccessClient.from_environment()
+        study_id = access.resolve_study(args.study_id, writable=True)
         producer_id = access.ensure_producer()
         run_id = ensure_run_id(run_dir, producer_id, args.run_id)
         manager = access.upload_manager(
-            args.study_id,
+            study_id,
             purpose="checkpoint",
             run_id=run_id,
             producer_id=producer_id,
+            requested_bytes=estimate_upload_bytes(
+                run_dir, min_age_seconds=args.min_age_seconds
+            ),
         )
         report = manager.checkpoint(
             run_dir,
@@ -431,31 +569,36 @@ def _artifacts_command(args: argparse.Namespace) -> int:
         )
     elif action == "resume":
         access = MandaAccessClient.from_environment()
-        manager = access.upload_manager(
-            args.study_id,
-            purpose="checkpoint",
-            run_id=args.run_id,
-            producer_id=args.producer_id,
+        study_id = access.resolve_study(args.study_id, writable=True)
+        producer_id = args.producer_id or access.ensure_producer()
+        manager = access.resume_manager(
+            study_id,
+            args.run_id,
+            producer_id,
         )
         report = manager.resume(
             args.run_id,
             destination=args.destination,
-            producer_id=args.producer_id,
+            producer_id=producer_id,
         )
     elif action == "push":
         config = load_config(args.config) if args.config else None
-        study_id = _artifact_study_id(args)
         run_dir = Path(args.run_dir).expanduser().resolve()
         if not run_dir.is_dir():
             raise ArtifactError(f"Run directory does not exist: {run_dir}")
         access = MandaAccessClient.from_environment()
+        study_id = _artifact_study_id(args, access)
         producer_id = access.ensure_producer()
         run_id = ensure_run_id(run_dir, producer_id, args.run_id)
+        requested_bytes = estimate_upload_bytes(run_dir)
+        if args.audit_dir:
+            requested_bytes += estimate_upload_bytes(args.audit_dir, metadata_allowance=0)
         manager = access.upload_manager(
             study_id,
             purpose="finalize",
             run_id=run_id,
             producer_id=producer_id,
+            requested_bytes=requested_bytes,
         )
         expected_episodes = None
         expected_tasks = None
@@ -510,6 +653,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     commands = {
         "auth": _auth_command,
+        "teams": _teams_command,
+        "studies": _studies_command,
+        "quota": _quota_command,
         "validate-config": _validate_command,
         "plan": _plan_command,
         "doctor": _doctor_command,

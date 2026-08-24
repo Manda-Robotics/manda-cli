@@ -48,6 +48,8 @@ class StorageSettings:
     lease_expires_at: str | None = None
     lease_name_prefix: str | None = None
     lease_study_id: str | None = None
+    lease_reservation_id: str | None = None
+    lease_requested_bytes: int | None = None
 
     @classmethod
     def from_environment(cls, *, require_producer: bool = True) -> StorageSettings:
@@ -131,6 +133,14 @@ class StorageSettings:
         region = lease.get("region")
         if region is not None and not isinstance(region, str):
             raise StorageError("Storage lease region must be a string or null")
+        reservation_id = lease.get("reservation_id")
+        if reservation_id is not None and not isinstance(reservation_id, str):
+            raise StorageError("Storage lease reservation_id must be a string or null")
+        requested_bytes = lease.get("requested_bytes")
+        if requested_bytes is not None and (
+            not isinstance(requested_bytes, int) or requested_bytes < 0
+        ):
+            raise StorageError("Storage lease requested_bytes must be a non-negative integer")
         return cls(
             remote=f"manda-lease:{bucket}",
             prefix=prefix,
@@ -144,6 +154,8 @@ class StorageSettings:
             lease_expires_at=required("expires_at"),
             lease_name_prefix=required("name_prefix").strip("/"),
             lease_study_id=required("study_id"),
+            lease_reservation_id=reservation_id,
+            lease_requested_bytes=requested_bytes,
         )
 
     @property
@@ -310,6 +322,8 @@ class RcloneClient:
             "endpoint": self.settings.endpoint,
             "region": self.settings.region,
             "lease_expires_at": self.settings.lease_expires_at,
+            "lease_reservation_id": self.settings.lease_reservation_id,
+            "lease_requested_bytes": self.settings.lease_requested_bytes,
             "application_key_file": (
                 str(self.settings.application_key_file)
                 if self.settings.application_key_file is not None
