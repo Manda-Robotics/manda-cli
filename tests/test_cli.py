@@ -5,7 +5,7 @@ import io
 import unittest
 from unittest.mock import patch
 
-from manda_cli.cli import _login_welcome, _parser, main
+from manda_cli.cli import _login_welcome, _parser, _resource_identity, main
 
 
 class CliTests(unittest.TestCase):
@@ -89,6 +89,20 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(grant.team_id, "robotics")
         self.assertEqual(grant.role, "contributor")
+
+    def test_team_and_study_names_and_ids_are_mutually_inferred(self) -> None:
+        self.assertEqual(
+            _resource_identity(None, "Manda Robotics", label="team"),
+            ("manda-robotics", "Manda Robotics"),
+        )
+        self.assertEqual(
+            _resource_identity("pilot-study", None, label="study"),
+            ("pilot-study", "Pilot Study"),
+        )
+        team = _parser().parse_args(["teams", "create", "--name", "Manda Robotics"])
+        study = _parser().parse_args(["studies", "create", "--id", "pilot-study"])
+        self.assertIsNone(team.team_id)
+        self.assertIsNone(study.title)
 
     def test_artifact_study_id_is_optional_for_auto_discovery(self) -> None:
         args = _parser().parse_args(["artifacts", "doctor"])

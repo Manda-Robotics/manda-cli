@@ -4,7 +4,9 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,7 @@ from .interesting import compare_runs, write_comparison
 from .planning import build_jobs, write_plan
 from .provenance import capture_provenance, write_provenance
 from .results import ResultsError, validate_results
-from .storage import StorageError
+from .storage import StorageError, require_rclone, safe_identifier
 from .trajectories import (
     AnalysisDependencyError,
     compare_trajectory_runs,
@@ -53,6 +55,41 @@ def _format_bytes(value: object) -> str:
         return f"{int(amount)} {unit}"
     precision = 0 if amount.is_integer() else 1
     return f"{amount:.{precision}f} {unit}"
+
+
+def _identifier_from_name(value: str, label: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    identifier = re.sub(r"[^A-Za-z0-9]+", "-", normalized).strip("-").lower()[:80]
+    if not identifier:
+        raise AccessError(f"Cannot infer {label} ID from {value!r}; pass --id explicitly")
+    return safe_identifier(identifier, f"{label} ID")
+
+
+def _display_name_from_identifier(value: str) -> str:
+    words = [word for word in re.split(r"[-_.]+", value) if word]
+    return " ".join(word[:1].upper() + word[1:] for word in words)
+
+
+def _resource_identity(
+    identifier: str | None,
+    display_name: str | None,
+    *,
+    label: str,
+) -> tuple[str, str]:
+    identifier = identifier.strip() if identifier else None
+    display_name = display_name.strip() if display_name else None
+    if not identifier and not display_name:
+        raise AccessError(
+            f"Creating a {label} requires --id or "
+            f"--{'name' if label == 'team' else 'title'}"
+        )
+    if identifier:
+        safe_identifier(identifier, f"{label} ID")
+    else:
+        identifier = _identifier_from_name(display_name or "", label)
+    if not display_name:
+        display_name = _display_name_from_identifier(identifier)
+    return identifier, display_name
 
 
 def _login_welcome(report: dict[str, Any], *, color: bool | None = None) -> None:
@@ -89,13 +126,13 @@ def _login_welcome(report: dict[str, Any], *, color: bool | None = None) -> None
         print()
         print(f"  {_styled('Ready for your first study?', '1', color=color)}")
         if not teams:
-            print("    manda teams create --id my-team --name \"My team\"")
+            print("    manda teams create --name \"My team\"")
             print(
-                "    manda studies create --id my-study --title \"My study\" "
+                "    manda studies create --title \"My study\" "
                 "--owner-team my-team"
             )
         else:
-            print("    manda studies create --id my-study --title \"My study\"")
+            print("    manda studies create --title \"My study\"")
     print()
 
 
@@ -145,8 +182,8 @@ def _parser() -> argparse.ArgumentParser:
     teams_subparsers = teams.add_subparsers(dest="teams_command", required=True)
     teams_subparsers.add_parser("list", help="List teams visible to the signed-in user")
     team_create = teams_subparsers.add_parser("create", help="Create a team owned by this user")
-    team_create.add_argument("--id", required=True, dest="team_id")
-    team_create.add_argument("--name", required=True)
+    team_create.add_argument("--id", dest="team_id", help="Stable ID; inferred from --name")
+    team_create.add_argument("--name", help="Display name; inferred from --id")
     team_members = teams_subparsers.add_parser("members", help="List team members")
     team_members.add_argument("team_id")
     team_invite = teams_subparsers.add_parser("invite", help="Invite or grant a team member")
@@ -160,8 +197,8 @@ def _parser() -> argparse.ArgumentParser:
     study_show = studies_subparsers.add_parser("show", help="Show one accessible study")
     study_show.add_argument("study_id")
     study_create = studies_subparsers.add_parser("create", help="Create a study")
-    study_create.add_argument("--id", required=True, dest="study_id")
-    study_create.add_argument("--title", required=True)
+    study_create.add_argument("--id", dest="study_id", help="Stable ID; inferred from --title")
+    study_create.add_argument("--title", help="Display title; inferred from --id")
     study_create.add_argument("--owner-team")
     study_grant = studies_subparsers.add_parser("grant", help="Share a study with a user or team")
     study_grant.add_argument("study_id")
@@ -395,7 +432,8 @@ def _teams_command(args: argparse.Namespace) -> int:
         teams = access.list_teams()
         report = {"teams": teams, "count": len(teams)}
     elif args.teams_command == "create":
-        report = access.create_team(args.team_id, args.name)
+        team_id, name = _resource_identity(args.team_id, args.name, label="team")
+        report = access.create_team(team_id, name)
     elif args.teams_command == "members":
         members = access.list_team_members(args.team_id)
         report = {"team_id": args.team_id, "members": members, "count": len(members)}
@@ -420,9 +458,10 @@ def _studies_command(args: argparse.Namespace) -> int:
             raise AccessError(f"Study {args.study_id!r} is not accessible")
         report = matches[0]
     elif args.studies_command == "create":
+        study_id, title = _resource_identity(args.study_id, args.title, label="study")
         report = access.create_study(
-            args.study_id,
-            args.title,
+            study_id,
+            title,
             owner_team_id=args.owner_team,
         )
     elif args.studies_command == "grant":
@@ -610,6 +649,11 @@ def _artifact_study_id(args: argparse.Namespace, access: MandaAccessClient) -> s
 
 def _artifacts_command(args: argparse.Namespace) -> int:
     action = args.artifact_command
+    uses_rclone = action in {"doctor", "checkpoint", "resume", "push", "pull"} or (
+        action == "verify" and not args.run_dir
+    )
+    if uses_rclone:
+        require_rclone(os.environ.get("ROBOLAB_STORAGE_RCLONE_BINARY", "rclone").strip())
     if action == "doctor":
         access = MandaAccessClient.from_environment()
         study_id = access.resolve_study(args.study_id, writable=True)

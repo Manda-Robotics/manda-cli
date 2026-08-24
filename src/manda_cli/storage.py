@@ -17,6 +17,17 @@ class StorageError(ValueError):
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def require_rclone(binary: str = "rclone") -> str:
+    resolved = shutil.which(binary)
+    if resolved is None:
+        raise StorageError(
+            f"Artifact transfers require {binary!r}, but it was not found on PATH. "
+            "Install rclone first (macOS: brew install rclone), or set "
+            "ROBOLAB_STORAGE_RCLONE_BINARY to its executable path."
+        )
+    return resolved
+
+
 def safe_identifier(value: str, label: str) -> str:
     if not _SAFE_ID.fullmatch(value):
         raise StorageError(
@@ -142,7 +153,9 @@ class StorageSettings:
         ):
             raise StorageError("Storage lease requested_bytes must be a non-negative integer")
         return cls(
-            remote=f"manda-lease:{bucket}",
+            # Environment-defined rclone remote names may contain only letters,
+            # digits, and underscores. A hyphen makes rclone ignore the section.
+            remote=f"manda_lease:{bucket}",
             prefix=prefix,
             producer_id=producer,
             bucket_id=required("bucket_id"),
@@ -238,6 +251,7 @@ class RcloneClient:
         input_text: str | None = None,
         timeout: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        require_rclone(self.settings.rclone_binary)
         try:
             result = subprocess.run(
                 [self.settings.rclone_binary, *arguments],

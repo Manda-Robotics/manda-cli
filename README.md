@@ -73,9 +73,9 @@ If the account has exactly one writable study, upload commands select it automat
 `--study-id` when several are available. Team owners can set up and share work without SQL:
 
 ```bash
-manda teams create --id robotics --name "Robotics team"
-manda teams invite robotics colleague@example.org --role member
-manda studies create --id my-study --title "My benchmark" --owner-team robotics
+manda teams create --name "Robotics team"  # ID inferred as robotics-team
+manda teams invite robotics-team colleague@example.org --role member
+manda studies create --title "My benchmark" --owner-team robotics-team
 manda studies grant my-study --email reviewer@example.org --role viewer
 ```
 

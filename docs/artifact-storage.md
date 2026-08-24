@@ -7,7 +7,9 @@ discover or download completed runs only for studies where they are a member.
 
 ## Sign in and discover access
 
-Install `rclone`. The official hosted Supabase URL and publishable key ship with the CLI, so no
+Install `rclone` (`brew install rclone` on macOS). Artifact commands check for it before requesting
+a storage lease and provide an actionable error if it is unavailable. The official hosted
+Supabase URL and publishable key ship with the CLI, so no
 service environment variables are needed. A benchmark host must not receive a Supabase secret
 key, Backblaze administration key, or permanent producer key.
 
@@ -55,12 +57,12 @@ The first account must be invited by the infrastructure operator. Afterwards, ow
 normal onboarding from the CLI:
 
 ```bash
-manda teams create --id robotics --name "Robotics team"
-manda teams invite robotics colleague@example.org --role member
-manda teams members robotics
+manda teams create --name "Robotics team"  # ID inferred as robotics-team
+manda teams invite robotics-team colleague@example.org --role member
+manda teams members robotics-team
 
-manda studies create --id manipulation-pilot --title "Manipulation pilot" \
-  --owner-team robotics
+manda studies create --title "Manipulation pilot" \
+  --owner-team robotics-team
 manda studies grant manipulation-pilot --email reviewer@example.org --role viewer
 manda studies show manipulation-pilot
 ```
@@ -68,6 +70,10 @@ manda studies show manipulation-pilot
 Team `owner`/`admin` roles manage membership. Study `viewer` can inspect/download,
 `contributor` can also upload, and `owner` can share the study. A team-owned study gives ordinary
 team members contributor access and team owners/admins owner access.
+
+For both teams and studies, either form is enough: `--name`/`--title` infers a stable lowercase ID,
+while `--id` infers a human-readable display name. Pass both only when the inferred value is not
+what you want.
 
 ## Credential model
 

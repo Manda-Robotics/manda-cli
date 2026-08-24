@@ -224,6 +224,13 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(report["temporary_credentials"])
         self.assertFalse(report["direct_credentials"])
         self.assertNotIn("temporary-secret", str(report))
+        environment = RcloneClient(settings)._environment()
+        self.assertEqual(settings.remote, "manda_lease:bucket")
+        self.assertEqual(environment["RCLONE_CONFIG_MANDA_LEASE_TYPE"], "s3")
+        self.assertEqual(
+            environment["RCLONE_CONFIG_MANDA_LEASE_SECRET_ACCESS_KEY"],
+            "temporary-secret",
+        )
 
     def test_upload_lease_requests_one_exact_purpose_and_run(self) -> None:
         access = RecordingAccessClient()
@@ -253,7 +260,7 @@ class AuthTests(unittest.TestCase):
         )
         self.assertEqual(
             manager.settings.lease_root,
-            "manda-lease:bucket/robolab/v1/producers/producer-a/runs/study-a/run-a",
+            "manda_lease:bucket/robolab/v1/producers/producer-a/runs/study-a/run-a",
         )
 
     def test_checkpoint_lease_uses_study_scoped_working_path(self) -> None:
@@ -274,7 +281,7 @@ class AuthTests(unittest.TestCase):
         )
         self.assertEqual(
             settings.working_root("run-a"),
-            "manda-lease:bucket/robolab/v1/producers/producer-a/working/study-a/run-a",
+            "manda_lease:bucket/robolab/v1/producers/producer-a/working/study-a/run-a",
         )
 
 
