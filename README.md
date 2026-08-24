@@ -61,8 +61,9 @@ manda studies list
 manda quota status
 manda artifacts doctor --write-test
 manda artifacts checkpoint --run-dir "$RUN_DIR"
-manda artifacts push --run-dir "$RUN_DIR" --stage pilot --policy pi05
+manda artifacts push --run-dir "$RUN_DIR"
 manda artifacts list --study-id my-study
+manda artifacts list --mine
 manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile analysis --study-id my-study
 ```
 
@@ -90,16 +91,26 @@ Every transfer requests a short-lived, operation- and path-scoped B2 application
 authenticated access service. The key exists only in the CLI process and is passed to `rclone`
 through its child environment. Benchmark hosts never receive the long-lived B2 administration
 key or a Supabase secret key. Upload leases reserve the estimated transfer size against the
-user's server-side quota; the hosted default is 5 GiB, and committed runs are reconciled from
-their verified manifests.
+user's server-side quota; the hosted default is 5 GiB. A successful push verifies the immutable B2 commit through the access
+service and atomically creates the Supabase run/task/episode/asset projection. It is therefore
+immediately visible to the uploader and other authorized study members.
 
-Passing `--config /path/to/experiment.toml` to `artifacts push` adds expected episode/task checks.
+`artifacts push` infers stage and policy from run metadata and the standard output-directory name.
+Passing `--config /path/to/experiment.toml` adds expected episode/task checks; explicit `--stage`
+and `--policy` values are available as overrides.
 Passing only `--study-id` keeps storage publication independent of a study checkout. See the
 [artifact operations guide](docs/artifact-storage.md) for the full workflow.
 
 Privileged database ingestion, bucket configuration, schema migrations, access-broker deployment,
 media signing, and dashboard deployment belong to the private `manda-infra` repository. This
 public client never accepts a Supabase secret key or long-lived B2 credential.
+
+Study owners can explicitly expose ready runs outside the team/member boundary:
+
+```bash
+manda studies publish my-study
+manda studies unpublish my-study
+```
 
 ## Planning and analysis
 

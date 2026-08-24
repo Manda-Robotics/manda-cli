@@ -12,7 +12,13 @@ from typing import Any
 
 from . import __version__
 from .access import AccessError, MandaAccessClient, auth_settings_report
-from .artifacts import ArtifactError, ensure_run_id, estimate_upload_bytes, verify_local_run
+from .artifacts import (
+    ArtifactError,
+    ensure_run_id,
+    estimate_upload_bytes,
+    infer_run_labels,
+    verify_local_run,
+)
 from .auth import AuthError, AuthManager, AuthSettings, SessionStore, save_client_config
 from .config import ConfigError, load_config
 from .doctor import run_doctor
@@ -136,6 +142,17 @@ def _login_welcome(report: dict[str, Any], *, color: bool | None = None) -> None
     print()
 
 
+def _artifact_progress(message: str, *, complete: bool = False) -> None:
+    color = sys.stderr.isatty() and "NO_COLOR" not in os.environ
+    marker = _styled(
+        "✓" if complete else "•",
+        "1",
+        "32" if complete else "36",
+        color=color,
+    )
+    print(f"  {marker} {message}", file=sys.stderr, flush=True)
+
+
 def _secure_token_file(path: str) -> str:
     token_path = Path(path).expanduser().resolve()
     if not token_path.is_file():
@@ -208,6 +225,14 @@ def _parser() -> argparse.ArgumentParser:
     study_grant.add_argument(
         "--role", choices=["viewer", "contributor", "owner"], default="viewer"
     )
+    study_publish = studies_subparsers.add_parser(
+        "publish", help="Make a study's ready runs publicly discoverable"
+    )
+    study_publish.add_argument("study_id")
+    study_unpublish = studies_subparsers.add_parser(
+        "unpublish", help="Return a published study to member-only visibility"
+    )
+    study_unpublish.add_argument("study_id")
 
     quota = subparsers.add_parser("quota", help="Inspect storage use and reservations")
     quota.add_subparsers(dest="quota_command", required=True).add_parser(
@@ -321,14 +346,21 @@ def _parser() -> argparse.ArgumentParser:
     push.add_argument("--run-id")
     push.add_argument("--config", help="Optional experiment TOML used for validation metadata")
     push.add_argument("--study-id")
-    push.add_argument("--stage")
-    push.add_argument("--policy")
+    push.add_argument("--stage", help="Override the stage inferred from the run directory")
+    push.add_argument("--policy", help="Override the policy inferred from the run directory")
     push.add_argument("--audit-dir")
+    push.add_argument("--quiet", action="store_true", help="Suppress interactive upload progress")
 
     artifact_list = artifact_subparsers.add_parser(
-        "list", help="List completed runs visible to the signed-in user"
+        "list", help="List artifact runs visible to the signed-in user"
     )
     artifact_list.add_argument("--study-id")
+    artifact_list.add_argument(
+        "--mine", action="store_true", help="Show only runs uploaded by this user"
+    )
+    artifact_list.add_argument(
+        "--status", choices=["processing", "ready", "failed"], help="Filter lifecycle status"
+    )
 
     pull = artifact_subparsers.add_parser(
         "pull", help="Materialize a completed run using a named download profile"
@@ -470,6 +502,11 @@ def _studies_command(args: argparse.Namespace) -> int:
             args.role,
             email=args.email,
             team_id=args.team_id,
+        )
+    elif args.studies_command in {"publish", "unpublish"}:
+        report = access.set_study_published(
+            args.study_id,
+            published=args.studies_command == "publish",
         )
     else:  # pragma: no cover - argparse enforces the choices
         raise AccessError(f"Unknown studies command: {args.studies_command}")
@@ -696,10 +733,39 @@ def _artifacts_command(args: argparse.Namespace) -> int:
             producer_id=producer_id,
         )
     elif action == "push":
+        interactive_progress = sys.stderr.isatty() and not args.quiet
+        if interactive_progress:
+            _artifact_progress("Preparing upload and requesting a secure storage lease…")
         config = load_config(args.config) if args.config else None
         run_dir = Path(args.run_dir).expanduser().resolve()
         if not run_dir.is_dir():
             raise ArtifactError(f"Run directory does not exist: {run_dir}")
+        labels = infer_run_labels(
+            run_dir,
+            known_stages=(
+                tuple(config.stages) if config else ("smoke", "pilot", "core", "deep_dive")
+            ),
+            known_policies=tuple(config.policies) if config else (),
+            stage=args.stage,
+            policy=args.policy,
+        )
+        stage = labels.stage
+        policy = labels.policy
+        if not stage:
+            raise ArtifactError(
+                "Cannot infer the run stage from run.json, execution provenance, "
+                "episode_results.jsonl, or the directory name; pass --stage"
+            )
+        if not policy:
+            raise ArtifactError(
+                "Cannot infer the run policy from run.json, execution provenance, "
+                "episode_results.jsonl, or the directory name; pass --policy"
+            )
+        if interactive_progress:
+            _artifact_progress(
+                f"Detected stage {stage} ({labels.stage_source}) · "
+                f"policy {policy} ({labels.policy_source})"
+            )
         access = MandaAccessClient.from_environment()
         study_id = _artifact_study_id(args, access)
         producer_id = access.ensure_producer()
@@ -716,24 +782,52 @@ def _artifacts_command(args: argparse.Namespace) -> int:
         )
         expected_episodes = None
         expected_tasks = None
-        if args.stage and config:
-            if args.stage not in config.stages:
-                raise ConfigError(f"Unknown stage {args.stage!r}")
-            stage_config = config.stages[args.stage]
+        if config:
+            if stage not in config.stages:
+                raise ConfigError(f"Unknown stage {stage!r}")
+            if policy not in config.policies:
+                raise ConfigError(f"Unknown policy {policy!r}")
+            stage_config = config.stages[stage]
             expected_episodes = stage_config.expected_episodes
             expected_tasks = stage_config.tasks or None
         report = manager.finalize(
             run_dir,
             study_id=study_id,
             run_id=run_id,
-            stage=args.stage,
-            policy=args.policy,
+            stage=stage,
+            policy=policy,
             expected_episodes=expected_episodes,
             expected_tasks=expected_tasks,
             audit_dir=args.audit_dir,
+            progress=_artifact_progress if interactive_progress else None,
+            show_transfer_progress=interactive_progress,
         )
+        if interactive_progress:
+            _artifact_progress("Registering the verified run with the dashboard…")
+        try:
+            registration = access.finalize_run(
+                study_id=study_id,
+                producer_id=producer_id,
+                run_id=run_id,
+                manifest_sha256=str(report["manifest_sha256"]),
+                object_count=int(report["object_count"]),
+                total_bytes=int(report["total_bytes"]),
+                reservation_id=manager.settings.lease_reservation_id,
+            )
+        except AccessError as exc:
+            raise AccessError(
+                "The artifact is safely committed in storage, but dashboard registration "
+                f"failed. Rerun the same push command to retry: {exc}"
+            ) from exc
+        report["dashboard"] = registration
+        if interactive_progress:
+            _artifact_progress("Upload committed, indexed, and visible.", complete=True)
     elif action == "list":
-        runs = MandaAccessClient.from_environment().list_runs(study_id=args.study_id)
+        runs = MandaAccessClient.from_environment().list_runs(
+            study_id=args.study_id,
+            mine=args.mine,
+            status=args.status,
+        )
         report = {"runs": runs, "count": len(runs)}
     elif action == "pull":
         access = MandaAccessClient.from_environment()

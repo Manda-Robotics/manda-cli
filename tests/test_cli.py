@@ -108,6 +108,25 @@ class CliTests(unittest.TestCase):
         args = _parser().parse_args(["artifacts", "doctor"])
         self.assertIsNone(args.study_id)
 
+    def test_artifact_push_progress_can_be_suppressed(self) -> None:
+        args = _parser().parse_args(
+            ["artifacts", "push", "--run-dir", "/tmp/run", "--quiet"]
+        )
+        self.assertTrue(args.quiet)
+
+    def test_artifact_list_supports_personal_and_status_filters(self) -> None:
+        args = _parser().parse_args(
+            ["artifacts", "list", "--mine", "--status", "ready"]
+        )
+        self.assertTrue(args.mine)
+        self.assertEqual(args.status, "ready")
+
+    def test_study_publication_commands(self) -> None:
+        publish = _parser().parse_args(["studies", "publish", "pilot"])
+        unpublish = _parser().parse_args(["studies", "unpublish", "pilot"])
+        self.assertEqual(publish.study_id, "pilot")
+        self.assertEqual(unpublish.study_id, "pilot")
+
 
 if __name__ == "__main__":
     unittest.main()

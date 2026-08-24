@@ -8,11 +8,13 @@ import shutil
 import tempfile
 import uuid
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .results import task_name, validate_results
+from .results import read_jsonl, task_name, validate_results
 from .storage import (
     RcloneClient,
     StorageSettings,
@@ -27,6 +29,16 @@ IDENTITY_FILE = ".artifact-run-id"
 MANIFEST_FILE = "manifest.json"
 RUN_FILE = "run.json"
 COMPLETE_FILE = "_COMPLETE"
+ProgressCallback = Callable[[str], None]
+COMMON_STAGE_NAMES = ("smoke", "pilot", "core", "deep_dive")
+
+
+@dataclass(frozen=True)
+class RunLabels:
+    stage: str | None
+    policy: str | None
+    stage_source: str | None
+    policy_source: str | None
 
 
 class ArtifactError(ValueError):
@@ -35,6 +47,87 @@ class ArtifactError(ValueError):
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _folder_contains_identifier(folder_name: str, identifier: str) -> bool:
+    normalized_folder = re.sub(r"[^a-z0-9]+", "-", folder_name.lower()).strip("-")
+    normalized_identifier = re.sub(r"[^a-z0-9]+", "-", identifier.lower()).strip("-")
+    return bool(normalized_identifier) and f"-{normalized_identifier}-" in (
+        f"-{normalized_folder}-"
+    )
+
+
+def _folder_label(folder_name: str, candidates: tuple[str, ...]) -> str | None:
+    matches = [value for value in candidates if _folder_contains_identifier(folder_name, value)]
+    return max(matches, key=len) if matches else None
+
+
+def infer_run_labels(
+    run_dir: str | Path,
+    *,
+    known_stages: tuple[str, ...] = COMMON_STAGE_NAMES,
+    known_policies: tuple[str, ...] = (),
+    stage: str | None = None,
+    policy: str | None = None,
+) -> RunLabels:
+    root = Path(run_dir).expanduser().resolve()
+    labels: dict[str, str | None] = {"stage": stage, "policy": policy}
+    sources: dict[str, str | None] = {
+        "stage": "command line" if stage else None,
+        "policy": "command line" if policy else None,
+    }
+    if stage:
+        safe_identifier(stage, "stage")
+    if policy:
+        safe_identifier(policy, "policy")
+
+    def take(source: str, value: object, field: str) -> None:
+        if labels[field] is not None or not isinstance(value, str) or not value.strip():
+            return
+        labels[field] = safe_identifier(value.strip(), field)
+        sources[field] = source
+
+    run_path = root / RUN_FILE
+    if run_path.is_file():
+        run = _load_json(run_path, "run metadata")
+        take("run.json", run.get("stage"), "stage")
+        take("run.json", run.get("policy"), "policy")
+
+    provenance = _audit_metadata(root)
+    job = provenance.get("job") if isinstance(provenance.get("job"), dict) else {}
+    take("execution provenance", job.get("stage"), "stage")
+    take("execution provenance", job.get("policy"), "policy")
+
+    results_path = root / "episode_results.jsonl"
+    if results_path.is_file() and (labels["stage"] is None or labels["policy"] is None):
+        rows = read_jsonl(results_path)
+        for field in ("stage", "policy"):
+            values = {
+                value.strip()
+                for row in rows
+                if isinstance((value := row.get(field)), str) and value.strip()
+            }
+            if len(values) == 1:
+                take("episode_results.jsonl", next(iter(values)), field)
+            elif len(values) > 1:
+                raise ArtifactError(
+                    f"Cannot infer one {field}: episode_results.jsonl contains "
+                    f"{', '.join(sorted(values))}"
+                )
+
+    if labels["stage"] is None:
+        stage = _folder_label(root.name, known_stages)
+        take("directory name", stage, "stage")
+    if labels["policy"] is None:
+        policy = _folder_label(root.name, known_policies)
+        take("directory name", policy, "policy")
+
+    return RunLabels(
+        stage=labels["stage"],
+        policy=labels["policy"],
+        stage_source=sources["stage"],
+        policy_source=sources["policy"],
+    )
 
 
 def file_sha256(path: Path) -> str:
@@ -429,6 +522,8 @@ class ArtifactManager:
         expected_episodes: int | None = None,
         expected_tasks: list[str] | tuple[str, ...] | None = None,
         audit_dir: str | Path | None = None,
+        progress: ProgressCallback | None = None,
+        show_transfer_progress: bool = False,
     ) -> dict[str, Any]:
         safe_identifier(study_id, "study ID")
         root = Path(run_dir).expanduser().resolve()
@@ -436,6 +531,8 @@ class ArtifactManager:
             raise ArtifactError(f"Run directory does not exist: {root}")
         local_completion_path = root / COMPLETE_FILE
         if local_completion_path.is_file():
+            if progress:
+                progress("Run is already finalized locally; verifying its remote commit…")
             if audit_dir is not None:
                 raise ArtifactError("Cannot add an audit bundle to an already completed run")
             marker = _load_json(local_completion_path, "completion marker")
@@ -459,6 +556,8 @@ class ArtifactManager:
         if audit_dir is not None:
             _copy_audit_bundle(Path(audit_dir).expanduser().resolve(), root)
 
+        if progress:
+            progress("Validating results and hashing artifact files…")
         identity = ensure_run_id(root, self.settings.producer_id, run_id)
         validation = validate_results(
             root,
@@ -485,6 +584,8 @@ class ArtifactManager:
 
         existing_complete = self.client.cat(remote_join(remote, COMPLETE_FILE), missing_ok=True)
         if existing_complete is not None:
+            if progress:
+                progress("Run already exists remotely; verifying the immutable commit…")
             try:
                 existing = json.loads(existing_complete)
             except json.JSONDecodeError as exc:
@@ -505,13 +606,23 @@ class ArtifactManager:
 
         transfer_paths = [entry["path"] for entry in manifest["files"]]
         transfer_paths.append(MANIFEST_FILE)
+        if progress:
+            progress(
+                f"Uploading {len(transfer_paths)} objects "
+                f"({manifest['total_bytes'] / (1024 * 1024):.1f} MiB)…"
+            )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
             files_from = Path(handle.name)
             for path in transfer_paths:
                 handle.write(path + "\n")
         try:
             filters = ("--files-from-raw", str(files_from))
-            self.client.copy(root, remote, *filters)
+            if show_transfer_progress:
+                self.client.copy(root, remote, *filters, progress=True)
+            else:
+                self.client.copy(root, remote, *filters)
+            if progress:
+                progress("Upload complete; verifying remote bytes…")
             self.client.check(root, remote, "--one-way", "--download", *filters)
         finally:
             files_from.unlink(missing_ok=True)
@@ -519,6 +630,8 @@ class ArtifactManager:
         if remote_manifest is None or text_sha256(remote_manifest) != manifest_sha:
             raise ArtifactError("Remote manifest digest differs after upload")
 
+        if progress:
+            progress("Verification passed; committing the immutable run…")
         completion = {
             "schema_version": 1,
             "run_id": identity,
@@ -537,6 +650,8 @@ class ArtifactManager:
         ):
             raise ArtifactError("Remote completion marker differs after upload")
 
+        if progress:
+            progress("Commit written; running the final integrity check…")
         report = self.verify_remote(
             identity,
             expected_manifest_sha256=manifest_sha,

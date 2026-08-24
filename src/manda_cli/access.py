@@ -175,16 +175,62 @@ class MandaAccessClient:
         self.auth.update_producer(producer_id, client_label)
         return producer_id
 
-    def list_runs(self, *, study_id: str | None = None) -> list[dict[str, Any]]:
-        query = {"study_id": study_id} if study_id else None
+    def list_runs(
+        self,
+        *,
+        study_id: str | None = None,
+        mine: bool = False,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = {}
+        if study_id:
+            query["study_id"] = study_id
+        if mine:
+            query["mine"] = "true"
+        if status:
+            query["status"] = status
         value = self._request("GET", "runs", query=query)
         rows = value.get("runs")
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AccessError("Manda access service returned an invalid run list")
         return rows
 
+    def finalize_run(
+        self,
+        *,
+        study_id: str,
+        producer_id: str,
+        run_id: str,
+        manifest_sha256: str,
+        object_count: int,
+        total_bytes: int,
+        reservation_id: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "study_id": study_id,
+            "producer_id": producer_id,
+            "run_id": run_id,
+            "manifest_sha256": manifest_sha256,
+            "object_count": object_count,
+            "total_bytes": total_bytes,
+        }
+        if reservation_id:
+            payload["reservation_id"] = reservation_id
+        return self._request("POST", "runs/finalize", payload=payload)
+
+    def set_study_published(self, study_id: str, *, published: bool) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"studies/{quote(study_id, safe='')}/publication",
+            payload={"published": published},
+        )
+
     def find_run(self, run_id: str, *, study_id: str | None = None) -> RunAccess:
-        matches = [row for row in self.list_runs(study_id=study_id) if row.get("run_id") == run_id]
+        matches = [
+            row
+            for row in self.list_runs(study_id=study_id, status="ready")
+            if row.get("run_id") == run_id
+        ]
         if not matches:
             raise ArtifactError(f"No accessible completed run found for {run_id!r}")
         if len(matches) > 1:

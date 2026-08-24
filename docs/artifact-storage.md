@@ -91,7 +91,7 @@ CLI never writes it to its session file, logs, JSON output, or command arguments
 Before an upload lease is issued, the CLI estimates the transfer size and the service atomically
 reserves it. The hosted personal quota defaults to 5 GiB. Checkpoint reservations remain charged
 until the run is finalized or the abandoned objects are cleaned up; final reservations are
-reconciled to verified manifest bytes by the private indexer. Backblaze keys cannot enforce a byte
+committed to the verified manifest byte count during synchronous registration. Backblaze keys cannot enforce a byte
 ceiling themselves, so this is cooperative preflight enforcement plus authoritative post-upload
 accounting, not a hard per-request network limiter.
 
@@ -154,9 +154,7 @@ After all writers have stopped, publish with a standalone study ID:
 ```bash
 manda artifacts push \
   --run-dir "$RUN_DIR" \
-  --study-id my-study \
-  --stage pilot \
-  --policy pi05
+  --study-id my-study
 ```
 
 Or pass an experiment config to validate expected episode and task counts:
@@ -164,25 +162,38 @@ Or pass an experiment config to validate expected episode and task counts:
 ```bash
 manda artifacts push \
   --run-dir "$RUN_DIR" \
-  --config /path/to/experiment.toml \
-  --stage pilot \
-  --policy pi05
+  --config /path/to/experiment.toml
 ```
+
+Stage and policy are inferred, in order, from an existing `run.json`, execution provenance,
+consistent fields in `episode_results.jsonl`, and the standard output-directory name. Explicit
+`--stage` and `--policy` values remain available as overrides. If the metadata is genuinely
+ambiguous, `push` stops and asks for the relevant override instead of publishing an unlabeled run.
 
 Finalization creates `run.json` and a per-file SHA-256 manifest, uploads only manifest-listed files,
 checks the remote payload, and writes `_COMPLETE` last. A completed prefix is immutable. Repeating
 the operation verifies and returns the existing commit instead of rewriting it.
 
-The private indexer projects committed B2 runs into Supabase. Until that synchronization has run,
-the object is durable but will not yet appear in `artifacts list` or the dashboard. This deliberate
-boundary prevents an unverified client request from becoming dashboard data. The infrastructure
-repository documents the synchronization command and is the right place to automate it on a
-schedule or queue.
+In an interactive terminal, `push` reports each preparation, upload, verification, and commit stage
+and shows rclone's live byte progress during transfer. Progress is written to stderr so the final
+JSON receipt on stdout remains scriptable. Pass `--quiet` to suppress interactive progress.
+
+After writing `_COMPLETE`, `push` asks the authenticated access service to verify the exact B2
+prefix, manifest digest, declared files, byte sizes, `run.json`, and result data. The service then
+atomically creates the Supabase run/task/episode/asset projection and commits the quota
+reservation. A successful push is therefore immediately visible in the CLI and dashboard; no
+separate discovery sync is part of the normal workflow. Rerunning the same push safely retries
+registration if a client stopped after committing B2.
+
+The private infrastructure importer remains available only for reconciliation of older or orphaned
+commits. It is not required after ordinary uploads.
 
 ## Discover and consume runs
 
 ```bash
 manda artifacts list --study-id my-study
+manda artifacts list --mine
+manda artifacts list --mine --status ready
 
 manda artifacts pull \
   --run-id "$RUN_ID" \
@@ -200,6 +211,11 @@ manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile full
 
 Every pull validates selected files against the committed SHA-256 manifest. If a run ID happens to
 be reused in more than one accessible study, pass `--study-id` to disambiguate it.
+
+`--mine` follows the authenticated user rather than the current producer ID, so it includes uploads
+from that user's local machine, Vast, Runpod, and any other registered client. Study membership
+still governs access: team/direct members see their studies, while non-members see only ready runs
+from studies that an owner explicitly publishes with `manda studies publish STUDY_ID`.
 
 Analysis commands also accept an indexed run ID instead of a local directory and cache the
 analysis profile under `ROBOLAB_ARTIFACT_CACHE` or the platform's default cache directory:

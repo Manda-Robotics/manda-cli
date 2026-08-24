@@ -60,6 +60,24 @@ class RecordingAccessClient(MandaAccessClient):
         }
 
 
+class RecordingApiClient(MandaAccessClient):
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str, dict[str, object] | None, dict[str, str] | None]] = []
+
+    def _request(  # type: ignore[override]
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, object] | None = None,
+        query: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        self.requests.append((method, path, payload, query))
+        if path == "runs":
+            return {"runs": []}
+        return {"ok": True}
+
+
 class StudyAccessClient(MandaAccessClient):
     def __init__(self, studies: list[dict[str, object]]) -> None:
         self.studies = studies
@@ -265,6 +283,39 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(
             manager.settings.lease_root,
             "manda_lease:bucket/robolab/v1/producers/producer-a/runs/study-a/run-a",
+        )
+
+    def test_personal_run_listing_and_finalize_are_authenticated_api_operations(self) -> None:
+        access = RecordingApiClient()
+        self.assertEqual(access.list_runs(study_id="study-a", mine=True), [])
+        access.finalize_run(
+            study_id="study-a",
+            producer_id="producer-a",
+            run_id="run-a",
+            manifest_sha256="a" * 64,
+            object_count=3,
+            total_bytes=42,
+            reservation_id="reservation-a",
+        )
+        self.assertEqual(
+            access.requests,
+            [
+                ("GET", "runs", None, {"study_id": "study-a", "mine": "true"}),
+                (
+                    "POST",
+                    "runs/finalize",
+                    {
+                        "study_id": "study-a",
+                        "producer_id": "producer-a",
+                        "run_id": "run-a",
+                        "manifest_sha256": "a" * 64,
+                        "object_count": 3,
+                        "total_bytes": 42,
+                        "reservation_id": "reservation-a",
+                    },
+                    None,
+                ),
+            ],
         )
 
     def test_checkpoint_lease_uses_study_scoped_working_path(self) -> None:

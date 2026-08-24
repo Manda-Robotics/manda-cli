@@ -262,6 +262,7 @@ class RcloneClient:
         check: bool = True,
         input_text: str | None = None,
         timeout: int | None = None,
+        live_stderr: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         require_rclone(self.settings.rclone_binary)
         command = [self.settings.rclone_binary]
@@ -274,7 +275,8 @@ class RcloneClient:
             result = subprocess.run(
                 command,
                 check=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=None if live_stderr else subprocess.PIPE,
                 text=True,
                 input=input_text,
                 timeout=timeout,
@@ -288,7 +290,11 @@ class RcloneClient:
         except subprocess.TimeoutExpired as exc:
             raise StorageError(f"rclone timed out while running {arguments[0]!r}") from exc
         if check and result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+            detail = (
+                (result.stderr or "").strip()
+                or result.stdout.strip()
+                or "see the transfer output above"
+            )
             raise StorageError(f"rclone {arguments[0]} failed: {detail}")
         return result
 
@@ -335,7 +341,13 @@ class RcloneClient:
         result = self.run(["cat", remote])
         return result.stdout
 
-    def copy(self, source: str | Path, destination: str, *extra: str) -> None:
+    def copy(
+        self,
+        source: str | Path,
+        destination: str,
+        *extra: str,
+        progress: bool = False,
+    ) -> None:
         source_value = str(source)
         destination_value = destination
         options = list(extra)
@@ -347,7 +359,12 @@ class RcloneClient:
                 options.extend(
                     ["--no-check-dest", "--no-traverse", "--s3-no-head", "--retries", "1"]
                 )
-        self.run(["copy", source_value, destination_value, *options])
+        if progress:
+            options.extend(["--progress", "--stats", "1s", "--stats-one-line"])
+        self.run(
+            ["copy", source_value, destination_value, *options],
+            live_stderr=progress,
+        )
 
     def copyto(self, source: str | Path, destination: str) -> None:
         options: list[str] = []

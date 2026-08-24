@@ -12,6 +12,7 @@ from manda_cli.artifacts import (
     ArtifactManager,
     create_manifest,
     estimate_upload_bytes,
+    infer_run_labels,
     verify_local_run,
 )
 from manda_cli.catalog import publish_catalog
@@ -65,7 +66,14 @@ class FilesystemRcloneClient:
             return None
         return extra[extra.index(flag) + 1]
 
-    def copy(self, source: str | Path, destination: str, *extra: str):
+    def copy(
+        self,
+        source: str | Path,
+        destination: str,
+        *extra: str,
+        progress: bool = False,
+    ):
+        del progress
         src = self._path(source)
         dst = self._path(destination)
         dst.mkdir(parents=True, exist_ok=True)
@@ -176,10 +184,41 @@ class ArtifactTests(unittest.TestCase):
         (run / "_COMPLETE").write_bytes(b"already-uploaded-last")
         self.assertEqual(estimate_upload_bytes(run, metadata_allowance=10), 15)
 
+    def test_run_labels_are_inferred_from_results_and_directory(self) -> None:
+        run = self.root / "benchmark_core_pi05"
+        run.mkdir()
+        _write_run(run)
+        labels = infer_run_labels(
+            run,
+            known_stages=("smoke", "core"),
+            known_policies=("pi05", "dreamzero"),
+        )
+        self.assertEqual(labels.stage, "core")
+        self.assertEqual(labels.stage_source, "directory name")
+        self.assertEqual(labels.policy, "pi05")
+        self.assertEqual(labels.policy_source, "episode_results.jsonl")
+
+    def test_existing_run_metadata_has_label_precedence(self) -> None:
+        run = self.root / "benchmark_core_pi05"
+        run.mkdir()
+        _write_run(run)
+        (run / "run.json").write_text(
+            json.dumps({"stage": "pilot", "policy": "dreamzero"}),
+            encoding="utf-8",
+        )
+        labels = infer_run_labels(
+            run,
+            known_stages=("pilot", "core"),
+            known_policies=("pi05", "dreamzero"),
+        )
+        self.assertEqual((labels.stage, labels.policy), ("pilot", "dreamzero"))
+        self.assertEqual((labels.stage_source, labels.policy_source), ("run.json", "run.json"))
+
     def test_finalize_list_pull_profiles_and_idempotence(self) -> None:
         run = self.root / "run"
         run.mkdir()
         _write_run(run)
+        progress: list[str] = []
         report = self.manager.finalize(
             run,
             study_id="study",
@@ -188,10 +227,15 @@ class ArtifactTests(unittest.TestCase):
             policy="pi05",
             expected_episodes=2,
             expected_tasks=["TaskA"],
+            progress=progress.append,
+            show_transfer_progress=True,
         )
         self.assertTrue(report["valid"])
         self.assertTrue(report["committed"])
         self.assertFalse(report["idempotent"])
+        self.assertTrue(any(message.startswith("Uploading ") for message in progress))
+        self.assertIn("Upload complete; verifying remote bytes…", progress)
+        self.assertIn("Commit written; running the final integrity check…", progress)
         repeated = self.manager.finalize(run, study_id="study", run_id="run-1")
         self.assertTrue(repeated["idempotent"])
 
