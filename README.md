@@ -66,6 +66,9 @@ manda artifacts list --study-id my-study
 manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile analysis --study-id my-study
 ```
 
+Successful interactive login prints a compact workspace welcome. Use `manda auth login --json`
+when a script needs the complete machine-readable session report.
+
 If the account has exactly one writable study, upload commands select it automatically. Pass
 `--study-id` when several are available. Team owners can set up and share work without SQL:
 

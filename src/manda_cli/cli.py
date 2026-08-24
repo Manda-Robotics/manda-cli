@@ -33,6 +33,72 @@ def _json(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
+def _styled(text: str, *codes: str, color: bool) -> str:
+    if not color:
+        return text
+    return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+
+def _format_bytes(value: object) -> str:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return "unknown"
+    amount = float(value)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    unit = units[0]
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            break
+        amount /= 1024
+    if unit == "B":
+        return f"{int(amount)} {unit}"
+    precision = 0 if amount.is_integer() else 1
+    return f"{amount:.{precision}f} {unit}"
+
+
+def _login_welcome(report: dict[str, Any], *, color: bool | None = None) -> None:
+    if color is None:
+        color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+    user = report.get("user") if isinstance(report.get("user"), dict) else {}
+    email = user.get("email") or "Manda user"
+    producer_id = report.get("producer_id") or "not registered"
+    teams = report.get("teams") if isinstance(report.get("teams"), list) else []
+    studies = report.get("studies") if isinstance(report.get("studies"), list) else []
+    quota = report.get("quota") if isinstance(report.get("quota"), dict) else {}
+    available = _format_bytes(quota.get("available_bytes"))
+    total = _format_bytes(quota.get("quota_bytes"))
+
+    brand = _styled("MANDA", "1", "36", color=color)
+    connected = _styled("CONNECTED", "1", "32", color=color)
+    rule = _styled("━" * 48, "2", "36", color=color)
+
+    def label(value: str) -> str:
+        return _styled(f"{value:<10}", "2", color=color)
+
+    print()
+    print(f"  {brand}  {_styled('•', '2', color=color)}  {connected}")
+    print(f"  {rule}")
+    print()
+    print(f"  {_styled('Welcome,', '1', color=color)} {email}")
+    print()
+    print(f"  {label('Client')}{producer_id}")
+    print(f"  {label('Storage')}{available} available of {total}")
+    print(f"  {label('Access')}{len(studies)} studies · {len(teams)} teams")
+
+    if not studies:
+        print()
+        print(f"  {_styled('Ready for your first study?', '1', color=color)}")
+        if not teams:
+            print("    manda teams create --id my-team --name \"My team\"")
+            print(
+                "    manda studies create --id my-study --title \"My study\" "
+                "--owner-team my-team"
+            )
+        else:
+            print("    manda studies create --id my-study --title \"My study\"")
+    print()
+
+
 def _secure_token_file(path: str) -> str:
     token_path = Path(path).expanduser().resolve()
     if not token_path.is_file():
@@ -64,6 +130,7 @@ def _parser() -> argparse.ArgumentParser:
     auth_login.add_argument("--email")
     auth_login.add_argument("--access-token-file")
     auth_login.add_argument("--client-label")
+    auth_login.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     auth_subparsers.add_parser("status", help="Show the current user, memberships, and client")
     auth_subparsers.add_parser("logout", help="Revoke and remove this CLI session")
     auth_configure = auth_subparsers.add_parser(
@@ -315,7 +382,10 @@ def _auth_command(args: argparse.Namespace) -> int:
         report = {"authenticated": False, "session_removed": True}
     else:  # pragma: no cover - argparse enforces the choices
         raise AuthError(f"Unknown auth command: {args.auth_command}")
-    _json(report)
+    if args.auth_command == "login" and not args.json:
+        _login_welcome(report)
+    else:
+        _json(report)
     return 0
 
 

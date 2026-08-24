@@ -5,7 +5,7 @@ import io
 import unittest
 from unittest.mock import patch
 
-from manda_cli.cli import _parser, main
+from manda_cli.cli import _login_welcome, _parser, main
 
 
 class CliTests(unittest.TestCase):
@@ -35,6 +35,36 @@ class CliTests(unittest.TestCase):
             main(["--version"])
         self.assertEqual(raised.exception.code, 0)
         self.assertEqual(output.getvalue().strip(), "manda 0.1.0")
+
+    def test_login_welcome_summarizes_the_workspace(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _login_welcome(
+                {
+                    "authenticated": True,
+                    "user": {"email": "user@example.com"},
+                    "producer_id": "producer-a",
+                    "teams": [],
+                    "studies": [],
+                    "quota": {
+                        "available_bytes": 5 * 1024**3,
+                        "quota_bytes": 5 * 1024**3,
+                    },
+                },
+                color=False,
+            )
+        value = output.getvalue()
+        self.assertIn("MANDA", value)
+        self.assertIn("CONNECTED", value)
+        self.assertIn("Welcome, user@example.com", value)
+        self.assertIn("5 GiB available of 5 GiB", value)
+        self.assertIn("0 studies · 0 teams", value)
+        self.assertIn("manda teams create", value)
+        self.assertNotIn('"authenticated"', value)
+
+    def test_auth_login_supports_machine_readable_output(self) -> None:
+        args = _parser().parse_args(["auth", "login", "--json"])
+        self.assertTrue(args.json)
 
     def test_push_validates_local_run_before_storage_access(self) -> None:
         stderr = io.StringIO()
