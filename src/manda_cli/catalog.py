@@ -62,6 +62,7 @@ def _task_rows(episodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         output.append(
             {
                 "source_run_id": run_id,
+                "source_producer_id": rows[0].get("source_producer_id"),
                 "source_manifest_sha256": rows[0].get("source_manifest_sha256"),
                 "study_id": rows[0].get("source_study_id"),
                 "producer_id": rows[0].get("source_producer_id"),

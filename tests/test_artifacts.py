@@ -308,6 +308,9 @@ class ArtifactTests(unittest.TestCase):
         self.assertTrue((output / "assets.jsonl").is_file())
         self.assertGreater(report["asset_count"], 0)
         self.assertTrue((output / "episodes.jsonl").is_file())
+        task = json.loads((output / "tasks.jsonl").read_text().splitlines()[0])
+        self.assertEqual(task["source_run_id"], "run-1")
+        self.assertEqual(task["source_producer_id"], "node-a")
         latest = self.remote / "bucket" / "robolab" / "v1" / "catalog" / "latest.json"
         self.assertEqual(json.loads(latest.read_text())["catalog_version"], "catalog-1")
 
