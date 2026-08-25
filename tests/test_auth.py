@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from manda_cli.access import MandaAccessClient
 from manda_cli.auth import (
@@ -283,6 +283,54 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(
             manager.settings.lease_root,
             "manda_lease:bucket/robolab/v1/producers/producer-a/runs/study-a/run-a",
+        )
+
+    def test_first_upload_from_new_client_registers_a_producer(self) -> None:
+        auth = Mock()
+        auth.settings = Mock()
+        auth.ensure_session.return_value = AuthSession(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            expires_at=2_000_000_000,
+            user_id="user-a",
+            email="user@example.com",
+        )
+        access = MandaAccessClient(auth)
+        lease_response = RecordingAccessClient()._request("POST", "storage/lease")
+
+        with patch.object(
+            access,
+            "_request",
+            side_effect=[{"producer_id": "u-user-a-new-client"}, lease_response],
+        ) as request:
+            access.upload_manager(
+                "study-a",
+                purpose="finalize",
+                run_id="run-a",
+                producer_label="new-client",
+                requested_bytes=1234,
+            )
+
+        self.assertEqual(
+            request.call_args_list,
+            [
+                call("POST", "producers", payload={"label": "new-client"}),
+                call(
+                    "POST",
+                    "storage/lease",
+                    payload={
+                        "operation": "upload",
+                        "study_id": "study-a",
+                        "producer_id": "u-user-a-new-client",
+                        "purpose": "finalize",
+                        "requested_bytes": 1234,
+                        "run_id": "run-a",
+                    },
+                ),
+            ],
+        )
+        auth.update_producer.assert_called_once_with(
+            "u-user-a-new-client", "new-client"
         )
 
     def test_personal_run_listing_and_finalize_are_authenticated_api_operations(self) -> None:
