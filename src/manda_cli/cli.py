@@ -21,6 +21,7 @@ from .artifacts import (
 )
 from .auth import AuthError, AuthManager, AuthSettings, SessionStore, save_client_config
 from .config import ConfigError, load_config
+from .dashboard_artifacts import prepare_dashboard_artifacts
 from .doctor import run_doctor
 from .execution import execute_job
 from .interesting import compare_runs, write_comparison
@@ -770,6 +771,11 @@ def _artifacts_command(args: argparse.Namespace) -> int:
         study_id = _artifact_study_id(args, access)
         producer_id = access.ensure_producer()
         run_id = ensure_run_id(run_dir, producer_id, args.run_id)
+        dashboard_artifacts = None
+        if not (run_dir / "_COMPLETE").is_file():
+            if interactive_progress:
+                _artifact_progress("Deriving compact event and trajectory diagnostics…")
+            dashboard_artifacts = prepare_dashboard_artifacts(run_dir)
         requested_bytes = estimate_upload_bytes(run_dir)
         if args.audit_dir:
             requested_bytes += estimate_upload_bytes(args.audit_dir, metadata_allowance=0)
@@ -801,7 +807,10 @@ def _artifacts_command(args: argparse.Namespace) -> int:
             audit_dir=args.audit_dir,
             progress=_artifact_progress if interactive_progress else None,
             show_transfer_progress=interactive_progress,
+            dashboard_artifacts=dashboard_artifacts,
         )
+        if dashboard_artifacts is not None:
+            report["dashboard_artifacts"] = dashboard_artifacts
         if interactive_progress:
             _artifact_progress("Registering the verified run with the dashboard…")
         try:

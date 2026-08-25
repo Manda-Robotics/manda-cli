@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .dashboard_artifacts import DASHBOARD_ARTIFACT_DIRECTORY, prepare_dashboard_artifacts
 from .results import read_jsonl, task_name, validate_results
 from .storage import (
     RcloneClient,
@@ -194,6 +195,8 @@ def _slug(value: str) -> str:
 def _role(path: str) -> str:
     name = Path(path).name
     suffix = Path(path).suffix.lower()
+    if f"/{DASHBOARD_ARTIFACT_DIRECTORY}/" in f"/{path}":
+        return "dashboard"
     if path.startswith("_audit/"):
         return "provenance"
     if name in {RUN_FILE, IDENTITY_FILE}:
@@ -287,7 +290,14 @@ def profile_includes(role: str, profile: str) -> bool:
     if profile == "analysis":
         return role not in {"video", "image"}
     if profile == "metadata":
-        return role in {"metadata", "result", "config", "provenance", "event_log"}
+        return role in {
+            "metadata",
+            "result",
+            "config",
+            "provenance",
+            "event_log",
+            "dashboard",
+        }
     raise ArtifactError(f"Unknown artifact profile: {profile!r}")
 
 
@@ -524,6 +534,7 @@ class ArtifactManager:
         audit_dir: str | Path | None = None,
         progress: ProgressCallback | None = None,
         show_transfer_progress: bool = False,
+        dashboard_artifacts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         safe_identifier(study_id, "study ID")
         root = Path(run_dir).expanduser().resolve()
@@ -557,7 +568,7 @@ class ArtifactManager:
             _copy_audit_bundle(Path(audit_dir).expanduser().resolve(), root)
 
         if progress:
-            progress("Validating results and hashing artifact files…")
+            progress("Preparing browser diagnostics and validating artifact files…")
         identity = ensure_run_id(root, self.settings.producer_id, run_id)
         validation = validate_results(
             root,
@@ -567,6 +578,9 @@ class ArtifactManager:
         if not validation["valid"]:
             errors = "; ".join(validation["errors"])
             raise ArtifactError(f"Refusing to finalize invalid run: {errors}")
+        dashboard = dashboard_artifacts or prepare_dashboard_artifacts(root)
+        if dashboard["warnings"]:
+            validation["warnings"] = [*validation["warnings"], *dashboard["warnings"]]
 
         record = self._run_record(
             root,

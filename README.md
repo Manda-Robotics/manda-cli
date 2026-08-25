@@ -91,9 +91,15 @@ Every transfer requests a short-lived, operation- and path-scoped B2 application
 authenticated access service. The key exists only in the CLI process and is passed to `rclone`
 through its child environment. Benchmark hosts never receive the long-lived B2 administration
 key or a Supabase secret key. Upload leases reserve the estimated transfer size against the
-user's server-side quota; the hosted default is 5 GiB. A successful push verifies the immutable B2 commit through the access
-service and atomically creates the Supabase run/task/episode/asset projection. It is therefore
-immediately visible to the uploader and other authorized study members.
+user's server-side quota; the hosted default is 5 GiB. A successful push verifies the immutable B2
+commit through the access service and atomically creates the Supabase run/task/episode/asset
+projection. It is therefore immediately visible to the uploader and other authorized study
+members.
+
+Before the manifest is sealed, `artifacts push` also derives one compact, versioned dashboard JSON
+per episode. It contains a normalized event timeline and, when HDF5 support is installed,
+downsampled browser timeseries. Install `manda-cli[dashboard]` for the HDF5 path; missing optional
+dependencies never discard the source trajectory and are reported as a validation warning.
 
 `artifacts push` infers stage and policy from run metadata and the standard output-directory name.
 Passing `--config /path/to/experiment.toml` adds expected episode/task checks; explicit `--stage`
