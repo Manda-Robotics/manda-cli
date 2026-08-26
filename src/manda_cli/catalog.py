@@ -123,6 +123,7 @@ def collect_catalog_rows(
     *,
     study_id: str | None = None,
     version: str | None = None,
+    all_producers: bool = True,
 ) -> dict[str, Any]:
     """Collect a portable relational catalog from committed B2 runs."""
     if study_id:
@@ -131,7 +132,7 @@ def collect_catalog_rows(
     safe_identifier(catalog_version, "catalog version")
     generated_at = utc_now()
 
-    runs = manager.list_runs(study_id=study_id, all_producers=True)
+    runs = manager.list_runs(study_id=study_id, all_producers=all_producers)
     episodes: list[dict[str, Any]] = []
     assets: list[dict[str, Any]] = []
     run_catalog: list[dict[str, Any]] = []
