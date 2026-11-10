@@ -1,64 +1,96 @@
 # Manda CLI
+**Share, verify and analyze robot policy evaluations from the command line.**
 
-`manda` is the standalone command-line client for Manda's RoboLab benchmark workflow. It owns
-provider-neutral artifact storage, experiment planning and execution, runtime checks, provenance,
-result validation, and trajectory analysis. The original `robot-audit` executable remains as a
-compatibility alias.
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Code style: Ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://docs.astral.sh/ruff/)
 
-The study repository is still responsible for experiment TOML files, benchmark-specific scripts,
-and scientific documentation. This repository contains the reusable client.
+`manda` is the client for Manda's robot evaluation service. It signs you in with the same account
+as the Manda dashboard, publishes benchmark runs to shared studies, and pulls, verifies and
+analyzes them again later. It also plans and runs RoboLab benchmark jobs on your own GPU.
 
-## Install
+Accounts are invite-only for now. Without one, the planning and analysis commands still work on
+local runs.
 
-Python 3.11 or newer is required. `rclone` is required for artifact transfers.
+[Artifact operations guide](docs/artifact-storage.md) · [Example experiment](examples/experiment.toml)
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[all]'
-manda --help
-```
+## Installation
 
-With `uv`:
+Requires **Python 3.11+**, and [rclone](https://rclone.org/install/) for artifact transfers.
+Install from source using [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
-```bash
-uv sync --extra all --extra dev
+```sh
+git clone https://github.com/Manda-Robotics/manda-cli.git
+cd manda-cli
+uv sync --extra all
 uv run manda --help
 ```
 
-## Command families
+Or use pip in a virtual environment: `python -m pip install -e '.[all]'`.
 
-```text
-manda validate-config       Validate an experiment TOML file
-manda plan                  Build a deterministic execution plan
-manda doctor                Check RoboLab and policy-server readiness
-manda execute               Dry-run or execute a planned benchmark job
-manda auth ...              Sign in, inspect, and end a user session
-manda teams ...             Create teams and invite members
-manda studies ...           Create, discover, and share studies
-manda quota status          Inspect personal artifact storage use
-manda artifacts ...         Checkpoint, publish, list, pull, and verify artifacts
-manda validate-results      Validate a local or remotely materialized run
-manda extract-trajectories  Derive HDF5 trajectory metrics
-manda compare-trajectories  Detect action and simulator-state drift
-manda compare               Rank task-level disagreements
-manda capture-provenance    Record repository, host, and GPU provenance
-```
+The core has no dependencies. Extras add what a workflow needs:
 
-The command layout leaves room for a future `manda vast ...` provider wrapper without coupling the
-artifact and analysis layers to Vast.ai.
+| Extra | Purpose |
+|---|---|
+| `dashboard` | HDF5 timeseries for the dashboard's episode charts when you push a run |
+| `analysis` | Trajectory extraction and comparison |
+| `all` | Both of the above |
+| `dev` | Tests and Ruff |
 
-## User authentication and artifact storage
+## Quickstart
 
-Clients authenticate as the same Supabase user used by the web dashboard. The official hosted
-service URL and publishable key are built into the client, so users do not need to set environment
-variables or handle infrastructure credentials.
+Sign in with your invited email address; the command prompts for a one-time code. Then check
+your studies and storage, and publish a finished run:
 
-```bash
-manda auth login --email you@example.org --client-label vast-gpu-01
-manda auth status
+```sh
+manda auth login --email you@example.org --client-label my-workstation
 manda studies list
 manda quota status
+manda artifacts push --run-dir "$RUN_DIR" --study-id my-study
+```
+
+A successful push is verified and immediately visible to every member of the study, in the
+dashboard and through `manda artifacts list`.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `manda auth ...` | Sign in, inspect and end a session |
+| `manda teams ...` | Create teams and invite members |
+| `manda studies ...` | Create, discover, share and publish studies |
+| `manda quota status` | Inspect your artifact storage use |
+| `manda artifacts ...` | Checkpoint, push, list, pull and verify runs |
+| `manda validate-config` | Validate an experiment TOML file |
+| `manda plan` | Build a deterministic execution plan |
+| `manda doctor` | Check RoboLab and policy-server readiness |
+| `manda execute` | Dry-run or execute a planned benchmark job |
+| `manda validate-results` | Validate a local or downloaded run |
+| `manda extract-trajectories` | Derive HDF5 trajectory metrics |
+| `manda compare-trajectories` | Detect action and simulator-state drift |
+| `manda compare` | Rank task-level disagreements |
+| `manda capture-provenance` | Record repository, host and GPU provenance |
+
+## Studies and sharing
+
+A study is a shared folder of runs. Team owners can set up and share work without help from Manda:
+
+```sh
+manda teams create --name "Robotics team"      # ID inferred as robotics-team
+manda teams invite robotics-team colleague@example.org --role member
+manda studies create --title "My benchmark" --owner-team robotics-team
+manda studies grant my-study --email reviewer@example.org --role viewer
+manda studies publish my-study                 # make ready runs public
+manda studies unpublish my-study
+```
+
+If your account has exactly one writable study, upload commands select it automatically. Pass
+`--study-id` when there are several. `manda auth login --json` prints the full session report
+for scripts.
+
+## Artifacts and security
+
+```sh
 manda artifacts doctor --write-test
 manda artifacts checkpoint --run-dir "$RUN_DIR"
 manda artifacts push --run-dir "$RUN_DIR"
@@ -67,78 +99,60 @@ manda artifacts list --mine
 manda artifacts pull --run-id "$RUN_ID" --destination ./run --profile analysis --study-id my-study
 ```
 
-Successful interactive login prints a compact workspace welcome. Use `manda auth login --json`
-when a script needs the complete machine-readable session report.
+The service address and its publishable key are built in, so there is nothing to configure and no
+infrastructure credential to handle. Access is enforced by the service's row-level security, not
+by this client.
 
-If the account has exactly one writable study, upload commands select it automatically. Pass
-`--study-id` when several are available. Team owners can set up and share work without SQL:
+- **Sessions:** the refreshable session is stored in a local file readable only by you. For a
+  non-interactive worker, `--access-token-file` takes a short-lived access token from such a
+  file; replace it before it expires.
+- **Transfers:** every transfer uses a short-lived storage key scoped to one operation and path.
+  It exists only in the CLI process and is handed to `rclone` through its environment. This
+  client never accepts a long-lived storage key or a service secret.
+- **Quota:** uploads reserve their estimated size against your storage quota first (5 GiB by
+  default). A push is verified against the stored objects before it becomes visible.
+- **Self-hosting:** `manda auth configure` points the client at another deployment; see
+  [`examples/auth.env.example`](examples/auth.env.example) for development overrides.
 
-```bash
-manda teams create --name "Robotics team"  # ID inferred as robotics-team
-manda teams invite robotics-team colleague@example.org --role member
-manda studies create --title "My benchmark" --owner-team robotics-team
-manda studies grant my-study --email reviewer@example.org --role viewer
-```
-
-`manda auth configure` supports a custom/self-hosted service; the example environment file remains
-available for development overrides. Public client configuration is never a substitute for RLS.
-
-Email login is invite-only and prompts for the one-time code. The refreshable session is stored in
-a mode-`600` local file. For a non-interactive worker, `--access-token-file` accepts a short-lived
-user access token from a mode-`600` file; the token must be replaced when it expires.
-
-Every transfer requests a short-lived, operation- and path-scoped B2 application key from the
-authenticated access service. The key exists only in the CLI process and is passed to `rclone`
-through its child environment. Benchmark hosts never receive the long-lived B2 administration
-key or a Supabase secret key. Upload leases reserve the estimated transfer size against the
-user's server-side quota; the hosted default is 5 GiB. A successful push verifies the immutable B2
-commit through the access service and atomically creates the Supabase run/task/episode/asset
-projection. It is therefore immediately visible to the uploader and other authorized study
-members.
-
-Before the manifest is sealed, `artifacts push` also derives one compact, versioned dashboard JSON
-per episode. It contains a normalized event timeline and, when HDF5 support is installed,
-downsampled browser timeseries. Install `manda-cli[dashboard]` for the HDF5 path; missing optional
-dependencies never discard the source trajectory and are reported as a validation warning.
-
-`artifacts push` infers stage and policy from run metadata and the standard output-directory name.
-Passing `--config /path/to/experiment.toml` adds expected episode/task checks; explicit `--stage`
-and `--policy` values are available as overrides.
-Passing only `--study-id` keeps storage publication independent of a study checkout. See the
+Before a run is sealed, `artifacts push` derives one compact JSON file per episode with its event
+timeline and, with the `dashboard` extra, downsampled timeseries for the dashboard. A missing
+optional dependency never discards the source trajectory; it is reported as a validation warning.
+Stage and policy are inferred from run metadata and the output directory name; `--stage`,
+`--policy` and `--config` override or check them. See the
 [artifact operations guide](docs/artifact-storage.md) for the full workflow.
 
-Privileged database ingestion, bucket configuration, schema migrations, access-broker deployment,
-media signing, and dashboard deployment belong to the private `manda-infra` repository. This
-public client never accepts a Supabase secret key or long-lived B2 credential.
+## Running benchmarks
 
-Study owners can explicitly expose ready runs outside the team/member boundary:
+Planning and execution take explicit paths to an experiment file, such as
+[`examples/experiment.toml`](examples/experiment.toml). They expect a RoboLab installation and a
+policy server on the machine that executes:
 
-```bash
-manda studies publish my-study
-manda studies unpublish my-study
-```
-
-## Planning and analysis
-
-The repository includes representative configuration examples, but installed commands always use
-explicit paths:
-
-```bash
-manda validate-config --config /path/to/experiment.toml
-manda plan --config /path/to/experiment.toml --stage smoke --output plans/smoke.jsonl
-manda execute --config /path/to/experiment.toml --plan plans/smoke.jsonl
-manda validate-results --config /path/to/experiment.toml --stage smoke --run-dir "$RUN_DIR"
+```sh
+manda validate-config --config experiment.toml
+manda plan --config experiment.toml --stage smoke --output plans/smoke.jsonl
+manda execute --config experiment.toml --plan plans/smoke.jsonl
+manda validate-results --config experiment.toml --stage smoke --run-dir "$RUN_DIR"
 manda extract-trajectories --run-dir "$RUN_DIR" --policy pi05 --output derived/pi05.jsonl
 ```
 
-Run `manda execute ... --yes` only after reviewing its dry-run output.
+`manda execute` is a dry run until you add `--yes`. Review its output first.
 
 ## Development
 
-```bash
+```sh
 uv sync --extra all --extra dev
 uv run pytest
 uv run ruff check src tests
 ```
 
-Real credentials, private environment files, artifact caches, derived data, and plans are ignored.
+Credentials, private environment files, artifact caches, derived data and plans are ignored by Git.
+
+## Credits
+
+Built by [Manda Robotics](https://mandarobotics.com). Benchmark execution integrates with NVIDIA's
+[RoboLab](https://github.com/NVlabs/RoboLab), Isaac Sim and Isaac Lab. For running frontier
+models as robot policies, see [Rung](https://github.com/Manda-Robotics/rung).
+
+## License
+
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.

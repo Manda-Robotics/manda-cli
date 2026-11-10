@@ -5,10 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "manda-cli"
 version = "0.1.0"
-description = "Standalone client for Manda benchmark execution, artifacts, and analysis"
+description = "Command-line client for Manda: share, verify and analyze robot policy evaluations"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
-authors = [{ name = "Manda" }]
+authors = [{ name = "Manda Robotics" }]
 dependencies = []
 
 [project.optional-dependencies]
