@@ -379,8 +379,13 @@ def prepare_dashboard_artifacts(
     max_points: int = DEFAULT_MAX_POINTS,
     max_series: int = DEFAULT_MAX_SERIES,
     max_dimensions: int = DEFAULT_MAX_DIMENSIONS,
+    skip_existing: bool = False,
 ) -> dict[str, Any]:
-    """Create deterministic browser diagnostics inside an unfinished artifact run."""
+    """Create deterministic browser diagnostics inside an unfinished artifact run.
+
+    With skip_existing, episodes that already have diagnostics keep their file untouched, so
+    a live uploader watching the folder does not send them again.
+    """
     root = Path(run_dir).expanduser().resolve()
     results_path = root / "episode_results.jsonl"
     if not results_path.is_file():
@@ -407,6 +412,14 @@ def prepare_dashboard_artifacts(
         output_task_directory = _safe_task_directory(root, name)
         env_id = _integer(row, "env_id", "episode", default=row_number - 1)
         run_index = _integer(row, "run_index", "run", default=0)
+        output = (
+            output_task_directory
+            / DASHBOARD_ARTIFACT_DIRECTORY
+            / f"run_{run_index}_env{env_id}.json"
+        )
+        generated.append(output.relative_to(root).as_posix())
+        if skip_existing and output.exists():
+            continue
         dt = _resolve_dt(source_task_directory, env_id, run_index)
         try:
             events = _events(source_task_directory, env_id, run_index, dt)
@@ -431,11 +444,6 @@ def prepare_dashboard_artifacts(
                 warnings.append(f"Cannot derive {name} run {run_index} env {env_id}: {exc}")
         if timeseries and timeseries.get("series"):
             timeseries_count += 1
-        output = (
-            output_task_directory
-            / DASHBOARD_ARTIFACT_DIRECTORY
-            / f"run_{run_index}_env{env_id}.json"
-        )
         _write_json(
             output,
             {
@@ -448,7 +456,6 @@ def prepare_dashboard_artifacts(
                 "timeseries": timeseries,
             },
         )
-        generated.append(output.relative_to(root).as_posix())
 
     if not hdf5_available and any(root.glob("*/run_*.hdf5")):
         warnings.append(

@@ -114,6 +114,16 @@ class DashboardArtifactTests(unittest.TestCase):
         self.assertEqual(actions["total_dimensions"], 10)
         self.assertEqual(actions["labels"], ["d0", "d1", "d2", "d3"])
 
+    def test_skip_existing_leaves_finished_episodes_untouched(self) -> None:
+        prepare_dashboard_artifacts(self.root)
+        output = self.task / "_dashboard" / "v1" / "run_1_env2.json"
+        before = output.stat()
+        report = prepare_dashboard_artifacts(self.root, skip_existing=True)
+        after = output.stat()
+        self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
+        self.assertEqual(report["generated"], ["TaskA/_dashboard/v1/run_1_env2.json"])
+        self.assertEqual(report["timeseries_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
