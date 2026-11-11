@@ -59,6 +59,7 @@ dashboard and through `manda artifacts list`.
 | `manda auth ...` | Sign in, inspect and end a session |
 | `manda teams ...` | Create teams and invite members |
 | `manda studies ...` | Create, discover, share and publish studies |
+| `manda evals ...` | Run, follow and stop hosted evaluations |
 | `manda quota status` | Inspect your artifact storage use |
 | `manda artifacts ...` | Checkpoint, push, list, pull and verify runs |
 | `manda validate-config` | Validate an experiment TOML file |
@@ -70,6 +71,28 @@ dashboard and through `manda artifacts list`.
 | `manda compare-trajectories` | Detect action and simulator-state drift |
 | `manda compare` | Rank task-level disagreements |
 | `manda capture-provenance` | Record repository, host and GPU provenance |
+
+## Hosted evaluations
+
+Run a RoboLab evaluation on a GPU node that Manda rents for you. The budget is held from your
+credit while the job runs, you are charged for the compute it used, and verified episodes appear
+in the study as they finish:
+
+```sh
+manda evals credit
+manda evals submit --study my-study --easiest 5 --episodes 10 --budget 5          # plan only
+manda evals submit --study my-study --easiest 5 --episodes 10 --budget 5 --yes    # start it
+manda evals show JOB_ID --watch
+manda evals list --active
+manda evals cancel JOB_ID
+```
+
+Choose tasks with `--task` (repeatable), `--easiest N` or `--all-tasks`, from the task catalog of
+the RoboLab revision the nodes run. `--policy` selects the pinned pi0.5 reference (`pi05`, the
+default), Rung on Manda's endpoint (`rung`), or your own OpenPI WebSocket server (`openpi` with
+`--name` and `--endpoint`, optionally labelled with `--version`, `--checkpoint` and
+`--training-config`). Parallel environments follow from the node and episode count. Every command
+prints JSON, and `submit` without `--yes` only shows the plan.
 
 ## Studies and sharing
 

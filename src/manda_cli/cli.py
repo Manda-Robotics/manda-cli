@@ -23,6 +23,18 @@ from .auth import AuthError, AuthManager, AuthSettings, SessionStore, save_clien
 from .config import ConfigError, load_config
 from .dashboard_artifacts import prepare_dashboard_artifacts
 from .doctor import run_doctor
+from .evals import (
+    GPU_NODES,
+    POLICIES,
+    TERMINAL,
+    EvalsClient,
+    build_spec,
+    easiest,
+    load_catalog,
+    parallel_plan,
+    summarize,
+    usd,
+)
 from .execution import execute_job
 from .interesting import compare_runs, write_comparison
 from .planning import build_jobs, write_plan
@@ -234,6 +246,42 @@ def _parser() -> argparse.ArgumentParser:
         "unpublish", help="Return a published study to member-only visibility"
     )
     study_unpublish.add_argument("study_id")
+
+    evals = subparsers.add_parser("evals", help="Run hosted benchmark evaluations on rented GPUs")
+    evals_subparsers = evals.add_subparsers(dest="evals_command", required=True)
+    evals_subparsers.add_parser("credit", help="Show available and held credit")
+    evals_list = evals_subparsers.add_parser("list", help="List your evaluations")
+    evals_list.add_argument("--active", action="store_true", help="Only those not yet finished")
+    evals_list.add_argument("--limit", type=int, default=50)
+    evals_show = evals_subparsers.add_parser("show", help="Show one evaluation")
+    evals_show.add_argument("job_id")
+    evals_show.add_argument(
+        "--watch", action="store_true", help="Print a line on every change until it finishes"
+    )
+    evals_show.add_argument("--interval", type=float, default=15)
+    evals_cancel = evals_subparsers.add_parser("cancel", help="Stop an evaluation")
+    evals_cancel.add_argument("job_id")
+    submit = evals_subparsers.add_parser(
+        "submit", help="Plan an evaluation; with --yes, hold the budget and start it"
+    )
+    submit.add_argument("--study", required=True, help="Study that receives the results")
+    chosen = submit.add_mutually_exclusive_group(required=True)
+    chosen.add_argument("--task", action="append", dest="tasks", help="A task; repeatable")
+    chosen.add_argument("--easiest", type=int, metavar="N", help="The N easiest catalog tasks")
+    chosen.add_argument("--all-tasks", action="store_true", help="Every catalog task")
+    submit.add_argument("--episodes", type=int, required=True, help="Episodes per task")
+    submit.add_argument("--policy", choices=POLICIES, default="pi05")
+    submit.add_argument("--name", help="openpi: policy name shown in results")
+    submit.add_argument("--endpoint", help="openpi: ws:// or wss:// policy address")
+    submit.add_argument("--version")
+    submit.add_argument("--checkpoint")
+    submit.add_argument("--training-config")
+    submit.add_argument("--gpu", choices=GPU_NODES, default=GPU_NODES[0])
+    submit.add_argument("--budget", type=float, required=True, help="USD held while it runs")
+    submit.add_argument("--seed", type=int, default=0)
+    submit.add_argument("--friction", default="upstream")
+    submit.add_argument("--sim-rate", type=float, help="Simulation frequency in Hz")
+    submit.add_argument("--yes", action="store_true", help="Submit; without it, only plan")
 
     quota = subparsers.add_parser("quota", help="Inspect storage use and reservations")
     quota.add_subparsers(dest="quota_command", required=True).add_parser(
@@ -512,6 +560,64 @@ def _studies_command(args: argparse.Namespace) -> int:
     else:  # pragma: no cover - argparse enforces the choices
         raise AccessError(f"Unknown studies command: {args.studies_command}")
     _json(report)
+    return 0
+
+
+def _evals_command(args: argparse.Namespace) -> int:
+    client = EvalsClient.from_environment()
+    action = args.evals_command
+    if action == "credit":
+        account = client.credit()
+        _json({**account, "held": usd(account["held_micros"]),
+               "balance": usd(account["balance_micros"])})
+    elif action == "list":
+        _json([summarize(job) for job in client.jobs(active=args.active, limit=args.limit)])
+    elif action == "show" and not args.watch:
+        _json(summarize(client.job(args.job_id)))
+    elif action == "show":
+        import time
+
+        last = None
+        while True:
+            current = summarize(client.job(args.job_id))
+            if current != last:
+                print(json.dumps(current, sort_keys=True), flush=True)
+                last = current
+            if current["status"] in TERMINAL:
+                return 0 if current["status"] == "succeeded" else 1
+            time.sleep(max(5.0, args.interval))
+    elif action == "cancel":
+        _json({"job_id": args.job_id, "status": client.cancel(args.job_id)})
+    elif action == "submit":
+        tasks = args.tasks
+        if args.easiest or args.all_tasks:
+            catalog = load_catalog()
+            tasks = (easiest(catalog, args.easiest) if args.easiest
+                     else sorted(task["task_name"] for task in catalog))
+        spec = build_spec(
+            tasks=tasks, episodes=args.episodes, policy=args.policy, gpu=args.gpu,
+            seed=args.seed, friction=args.friction, sim_rate_hz=args.sim_rate,
+            name=args.name, uri=args.endpoint, version=args.version,
+            checkpoint=args.checkpoint, training_config=args.training_config,
+        )
+        plan = parallel_plan(args.gpu, args.policy, args.episodes)
+        report = {
+            "study_id": args.study,
+            "tasks": len(spec["tasks"]),
+            "episodes": len(spec["tasks"]) * args.episodes,
+            "batches_per_task": f"{plan['batches']} of {plan['num_envs']}",
+            "gpu": args.gpu,
+            "budget": usd(round(args.budget * 1_000_000)),
+            "spec": spec,
+        }
+        if not args.yes:
+            _json({**report, "submitted": False, "next": "rerun with --yes to submit"})
+            return 0
+        job_id = client.submit(args.study, spec, args.budget)
+        _json({**report, "submitted": True, "job_id": job_id,
+               "follow": f"manda evals show {job_id} --watch"})
+    else:  # pragma: no cover - argparse enforces the choices
+        raise ValueError(f"Unknown evals command: {action}")
     return 0
 
 
@@ -873,6 +979,7 @@ def main(argv: list[str] | None = None) -> int:
         "teams": _teams_command,
         "studies": _studies_command,
         "quota": _quota_command,
+        "evals": _evals_command,
         "validate-config": _validate_command,
         "plan": _plan_command,
         "doctor": _doctor_command,
