@@ -89,7 +89,8 @@ manda evals cancel JOB_ID
 
 Choose tasks with `--task` (repeatable), `--easiest N` or `--all-tasks`, from the task catalog of
 the RoboLab revision the nodes run. `--policy` selects the pinned pi0.5 reference (`pi05`, the
-default), Rung on Manda's endpoint (`rung`), or your own OpenPI WebSocket server (`openpi` with
+default), Rung on Manda's endpoint (`rung`, with `--model gemini-4-argon` (default),
+`claude-fable-5-2` or `gpt-6.1-sol`, each over its vendor's paid API), or your own OpenPI WebSocket server (`openpi` with
 `--name` and `--endpoint`, optionally labelled with `--version`, `--checkpoint` and
 `--training-config`). Parallel environments follow from the node and episode count. Every command
 prints JSON, and `submit` without `--yes` only shows the plan.

@@ -26,6 +26,7 @@ from .doctor import run_doctor
 from .evals import (
     GPU_NODES,
     POLICIES,
+    RUNG_MODELS,
     TERMINAL,
     EvalsClient,
     build_spec,
@@ -274,6 +275,10 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--name", help="openpi: policy name shown in results")
     submit.add_argument("--endpoint", help="openpi: ws:// or wss:// policy address")
     submit.add_argument("--version")
+    submit.add_argument(
+        "--model", choices=RUNG_MODELS,
+        help=f"rung: the model behind Manda's endpoint (default {RUNG_MODELS[0]})",
+    )
     submit.add_argument("--checkpoint")
     submit.add_argument("--training-config")
     submit.add_argument("--gpu", choices=GPU_NODES, default=GPU_NODES[0])
@@ -599,6 +604,7 @@ def _evals_command(args: argparse.Namespace) -> int:
             seed=args.seed, friction=args.friction, sim_rate_hz=args.sim_rate,
             name=args.name, uri=args.endpoint, version=args.version,
             checkpoint=args.checkpoint, training_config=args.training_config,
+            model=args.model,
         )
         plan = parallel_plan(args.gpu, args.policy, args.episodes)
         report = {

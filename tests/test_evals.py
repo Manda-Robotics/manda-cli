@@ -67,3 +67,15 @@ def test_submit_without_yes_only_plans(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert code == 0 and report["submitted"] is False
     assert report["episodes"] == 10 and report["batches_per_task"] == "2 of 5"
+
+
+def test_rung_jobs_name_the_model_behind_the_endpoint():
+    default = build_spec(tasks=["BananaInBowlTask"], episodes=1, policy="rung")
+    assert default["policy"]["version"] == "gemini-4-argon"
+    fable = build_spec(tasks=["BananaInBowlTask"], episodes=1, policy="rung",
+                       model="claude-fable-5-2")
+    assert fable["policy"]["version"] == "claude-fable-5-2"
+    with pytest.raises(EvalError):
+        build_spec(tasks=["BananaInBowlTask"], episodes=1, policy="rung", model="gpt-0")
+    with pytest.raises(EvalError):
+        build_spec(tasks=["BananaInBowlTask"], episodes=1, policy="pi05", model="gemini-4-argon")

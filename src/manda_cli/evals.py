@@ -26,7 +26,9 @@ TASK_CATALOG_URL = (
 )
 REFERENCE_VERSION = "droid-jointpos@aa64205"
 RUNG_ENDPOINT = "wss://policy.mandarobotics.com"
-RUNG_MODEL = "gpt-6.1-sol"
+RUNG_MODELS = ("gemini-4-argon", "claude-fable-5-2", "gpt-6.1-sol")
+"""Models Manda's endpoint serves for Rung jobs, over each vendor's paid API."""
+RUNG_MODEL = RUNG_MODELS[0]
 GPU_NODES = ("RTX PRO 5000", "RTX PRO 4000")
 POLICIES = ("pi05", "rung", "openpi")
 TERMINAL = ("succeeded", "failed", "cancelled")
@@ -80,6 +82,7 @@ def build_spec(
     version: str | None = None,
     checkpoint: str | None = None,
     training_config: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     if not tasks or len(tasks) > 200 or len(set(tasks)) != len(tasks):
         raise EvalError("choose 1 to 200 distinct tasks")
@@ -95,14 +98,20 @@ def build_spec(
         raise EvalError("friction must be upstream, realistic or a coefficient")
     if sim_rate_hz is not None and not 1 <= sim_rate_hz <= 10000:
         raise EvalError("simulation frequency must be 1 to 10000 Hz")
+    if model is not None and policy != "rung":
+        raise EvalError("--model applies to --policy rung only")
     if policy == "pi05":
         policy_spec: dict[str, Any] = {
             "kind": "reference", "name": "pi05", "version": REFERENCE_VERSION
         }
     elif policy == "rung":
+        model = model or RUNG_MODEL
+        if model not in RUNG_MODELS:
+            raise EvalError(f"Rung serves these models: {', '.join(RUNG_MODELS)}")
+        # The version names the model; the service issues the job a key for that model.
         policy_spec = {
             "kind": "endpoint", "protocol": "rung", "name": "rung",
-            "version": RUNG_MODEL, "uri": RUNG_ENDPOINT,
+            "version": model, "uri": RUNG_ENDPOINT,
         }
     elif policy == "openpi":
         if not name or not _NAME.fullmatch(name):
